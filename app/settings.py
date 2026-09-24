@@ -84,6 +84,15 @@ def check_update() -> bool:
     """启动时要不要去 GitHub 查一次最新版本号：默认开，只出这一次网，设置里能关。"""
     return bool(_read("check_update", True))
 
+def bilingual() -> bool:
+    """双语模式：对方消息翻成中文 + 用 bilingual_lang() 写 3 条回复（带中文对照），填入只填外语。
+    开了就不调 Jev，只要起草那把 key。默认关。"""
+    return bool(_read("bilingual", False))
+
+def bilingual_lang() -> str:
+    """双语模式下回复用的语言，默认德语。"""
+    return str(_read("bilingual_lang") or "德语")
+
 def debug_view() -> bool:
     """调试视图：另开一个窗口实时画识别框。默认关，开了子进程才往队列里送帧。"""
     return bool(_read("debug_view", False))
@@ -145,7 +154,9 @@ def llm_key() -> str:
 def has_llm_key() -> bool:
     return bool(llm_key())
 
-has_key = has_jev_key  # 旧名字：界面上「配没配好」问的就是判断模型这把 key
+def has_key() -> bool:
+    """界面上「配没配好」：双语模式只要起草那把，普通模式要判断那把。"""
+    return has_llm_key() if bilingual() else has_jev_key()
 
 def save(relationship_text: str | None = None, context_n: int | None = None, *,
          jev_provider_text: str | None = None, jev_key_text: str | None = None,
@@ -153,7 +164,8 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
          llm_key_text: str | None = None, draft_model_text: str | None = None,
          draft_base_url_text: str | None = None, reply_target_on: bool | None = None,
          style_text: str | None = None, thinking_on: bool | None = None,
-         check_update_on: bool | None = None, debug_view_on: bool | None = None) -> None:
+         check_update_on: bool | None = None, debug_view_on: bool | None = None,
+         bilingual_on: bool | None = None, bilingual_lang_text: str | None = None) -> None:
     """每个参数为空/None = 保留当前值。两把 key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
     draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
@@ -183,6 +195,8 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "thinking": flag(thinking_on, thinking),
         "check_update": flag(check_update_on, check_update),
         "debug_view": flag(debug_view_on, debug_view),
+        "bilingual": flag(bilingual_on, bilingual),
+        "bilingual_lang": keep(bilingual_lang_text, "bilingual_lang"),
     }
     with open(_CONFIG, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)

@@ -201,6 +201,11 @@ class _ReplyCard(_Surface):
         self.text = _label(owner.cands[index], 15)
         self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         box.addWidget(self.text)
+        gloss = owner.glosses[index] if index < len(owner.glosses) else ""
+        if gloss:  # 双语模式：外语下面一行中文对照，只给自己看，填入不带它
+            self.gloss = _label(gloss, 12, _MUTED)
+            self.gloss.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            box.addWidget(self.gloss)
         bottom = QHBoxLayout()
         bottom.addStretch(1)
         self.fillButton = (PrimaryPushButton if recommended else PushButton)("填入", self)
@@ -234,6 +239,7 @@ class Overlay:
         self.on_toggle_debug = on_toggle_debug
         self.result_of = result_of
         self.cands = []
+        self.glosses = []  # 双语模式：每条候选的中文对照，跟 cands 同索引
         self.cards = []
         self._busy = False
         self._current = False
@@ -538,6 +544,22 @@ class Overlay:
         box.addWidget(self._hint(
             "开了以后群聊里可以选回复给谁，候选会针对 TA 写，填入时可带 @。关了就正常回复。"
         ))
+        bilingual_row = QHBoxLayout()
+        bilingual_row.addWidget(_label("双语模式（翻译 + 外语回复）", 13), 1)
+        self.bilingualSwitch = SwitchButton()
+        self.bilingualSwitch.setOnText("开")
+        self.bilingualSwitch.setOffText("关")
+        self.bilingualSwitch.setAccessibleName("双语模式")
+        bilingual_row.addWidget(self.bilingualSwitch)
+        box.addLayout(bilingual_row)
+        self.langEdit = LineEdit()
+        self.langEdit.setPlaceholderText("回复语言，例如：德语、英语")
+        self.langEdit.setAccessibleName("双语模式的回复语言")
+        box.addWidget(self.langEdit)
+        box.addWidget(self._hint(
+            "开了以后对方的消息翻成中文给你看，3 条候选用上面的语言写并附中文意思，填入只填外语。"
+            "这个模式不调 Jev，只要「起草」那把 key。"
+        ))
         update_row = QHBoxLayout()
         update_row.addWidget(_label("启动时检查更新", 13), 1)
         self.updateSwitch = SwitchButton()
@@ -774,6 +796,8 @@ class Overlay:
         self.styleEdit.setText(settings.style())
         self.contextBox.setValue(settings.context())
         self.targetSwitch.setChecked(settings.reply_target())
+        self.bilingualSwitch.setChecked(settings.bilingual())
+        self.langEdit.setText(settings.bilingual_lang())
         self._set_group(self.jev, settings.jev_provider(), settings.jev_model())
         self._set_group(self.draft, settings.draft_provider(), settings.draft_model())
         self.baseEdit.setText(settings.draft_base_url())
@@ -797,7 +821,9 @@ class Overlay:
             self._settings_feedback("自定义来源要填 Base URL。", error=True)
             self.baseEdit.setFocus()
             return
-        for group, provider in ((self.jev, jev_provider), (self.draft, draft_provider)):
+        bilingual = self.bilingualSwitch.isChecked()
+        groups = ((self.draft, draft_provider),) if bilingual else ((self.jev, jev_provider), (self.draft, draft_provider))
+        for group, provider in groups:  # 双语模式不调 Jev，判断那组可以空着
             name = group.table[provider].name
             if not group.keyEdit.text().strip() and not group.stored_key():
                 self._settings_feedback(f"请先填写 {group.keyTitle} 的 API 密钥。", error=True)
@@ -819,7 +845,9 @@ class Overlay:
                           reply_target_on=self.targetSwitch.isChecked(),
                           style_text=self.styleEdit.text().strip(),
                           thinking_on=self.thinkingSwitch.isChecked(),
-                          check_update_on=self.updateSwitch.isChecked())
+                          check_update_on=self.updateSwitch.isChecked(),
+                          bilingual_on=bilingual,
+                          bilingual_lang_text=self.langEdit.text().strip() or "德语")
         except Exception:
             self._settings_feedback("保存失败，请检查配置文件是否可写后重试。", error=True)
             return
@@ -1101,6 +1129,7 @@ class Overlay:
             self.show(result)
         else:
             self.cands = []
+            self.glosses = []
             self._clear_cards()
             self.insight.hide()
             self.referenceNote.hide()
@@ -1114,6 +1143,7 @@ class Overlay:
     def show(self, result):
         """按推荐顺序展示，按钮始终绑定 candidates 的原始索引。"""
         self.cands = result["candidates"]
+        self.glosses = result.get("glosses") or []
         self.set_busy(False)
         self._current = bool(self.cands)
         self._clear_cards()
@@ -1131,6 +1161,13 @@ class Overlay:
             self.replyBox.addWidget(card)
             self.cards.append(card)
         reply_to = result.get("reply_to")
+        if "translation" in result:  # 双语模式：没有 Jev 判断，这张卡改放对方消息的中文翻译
+            self.insightTitle.setText("对方说（中文）" + (f" · 回复给 {reply_to}" if reply_to else ""))
+            self.summary.setText(result.get("translation") or "（没有翻译）")
+            self.intent.setText(f"候选用{settings.bilingual_lang()}写，灰字是中文意思；填入只填{settings.bilingual_lang()}")
+            self.tension.setText("")
+            self._finish_show()
+            return
         self.insightTitle.setText(f"对话参考 · 回复给 {reply_to}" if reply_to else "对话参考")
         answers = result.get("answers") or {}
         self.summary.setText("建议：" + _choice(answers, "best_action"))
@@ -1144,6 +1181,9 @@ class Overlay:
             color = "#b44832"
         qss = f"BodyLabel {{ color: {color}; background: transparent; }}"
         setCustomStyleSheet(self.tension, qss, qss)
+        self._finish_show()
+
+    def _finish_show(self):
         self.empty.setVisible(not self.cands)
         self.insight.setVisible(bool(self.cands))
         self.referenceNote.setVisible(bool(self.cands) and not self._compact)

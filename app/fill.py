@@ -57,6 +57,16 @@ def fill(hwnd, area, text):
     x0, _, _, y1 = area
     cx, cy = r.left + x0 + 60, r.top + y1 + 40  # 分隔线下 40px = 输入框文字区；工具栏和「发送」在输入区最底下，碰不到
     unminimize(hwnd)
+    _click_paste(hwnd, cx, cy)
+
+
+def fill_at(hwnd, point, text):
+    """QQ / WhatsApp：UI 自动化给出的输入框屏幕坐标（物理像素），点进去再粘贴。同样绝不发送。"""
+    set_clipboard(text)
+    _click_paste(hwnd, *point)
+
+
+def _click_paste(hwnd, cx, cy):
 
     # SetForegroundWindow 有前台窗口保护，普通后台进程会被拒；AttachThreadInput 绕过
     fg = u32.GetForegroundWindow()

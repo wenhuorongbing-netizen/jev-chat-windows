@@ -13,19 +13,20 @@ import threading
 import traceback
 from collections import deque
 
-from app import settings, update, worker
+from app import settings, uia_worker, update, worker
 from app.capture import find_wechat_hwnd
-from app.fill import fill
+from app.fill import fill, fill_at
 from app.overlay import Overlay
 from app.version import VERSION
-from core.engine import analyze
+from core.engine import analyze, analyze_bilingual
 
 # {会话名: {history, result, rev, target, senders}}：每个会话各自的上下文、上次结果和版本号，互不串味
 # history 里是 [(who, text, name)]，engine 只认 her/me，name 是群里的发言人（单聊/自己说的是 None）；
 # 只是缓冲区，实际喂模型几条由设置里的「参考上下文」决定
 # senders：这个群里发过言的人，去重、最近的排最前；target：用户挑的回复对象（None = 跟着最近那个走）
 chats = {}
-state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": ""}
+state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": "",
+         "uia": {}}  # uia: {会话名: (hwnd, 输入框屏幕坐标)}，QQ / WhatsApp 的会话填入走这里
 results = queue.Queue()
 update_result = queue.Queue()  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
 
@@ -44,6 +45,10 @@ def target_of(title):
 
 
 def fill_reply(text):
+    uia = state["uia"].get(ov.current_chat())
+    if uia:  # QQ / WhatsApp：按 UI 自动化报上来的输入框位置填
+        fill_at(uia[0], uia[1], text)
+        return
     if state["hwnd"] is None:  # 子进程重开过，hwnd 可能换了，用最新的
         raise RuntimeError("未找到聊天窗口，请确认已经打开")
     if state["area"] is None:
@@ -91,7 +96,9 @@ def on_toggle_capture(on):
     global child
     if not on:
         capture_on.clear()
+        uia_on.clear()
         return
+    uia_on.set()
     if child is None:
         try:
             state["hwnd"] = find_wechat_hwnd()
@@ -105,6 +112,16 @@ def on_toggle_capture(on):
 def analyze_bg(msgs, title, revision, reply_to=None):
     """后台线程只跑网络调用，结果丢队列；UI 只在主线程的 tick 里动（Qt 不能跨线程碰）。"""
     try:
+        if settings.bilingual():
+            results.put(("ok", analyze_bilingual(msgs, settings.relationship(), settings.bilingual_lang(),
+                                                 context=settings.context(),
+                                                 model=settings.draft_model() or None,
+                                                 provider=settings.draft_provider(),
+                                                 base_url=settings.draft_base_url() or None,
+                                                 reply_to=reply_to, style=settings.style(),
+                                                 thinking=settings.thinking()),
+                         title, revision))
+            return
         results.put(("ok", analyze(msgs, settings.relationship(), context=settings.context(),
                                    model=settings.draft_model() or None,
                                    provider=settings.draft_provider(),
@@ -126,7 +143,7 @@ def check_update_bg():
 
 
 def start_analyze(title, msgs):
-    if not settings.has_jev_key():
+    if not settings.bilingual() and not settings.has_jev_key():
         ov.set_status("请先在设置中配置模型", "warning")
         return
     if not settings.has_llm_key():
@@ -162,6 +179,9 @@ def drain():
         except queue.Empty:
             return
         kind = msg[0]
+        if kind == "uia_input":  # QQ / WhatsApp 某个会话的输入框位置
+            state["uia"][msg[1]] = (msg[2], msg[3])
+            continue
         if kind == "area":  # 只是窗口挪了位置，坐标跟着更新，别的什么都不用动
             state["area"] = msg[1]
             continue
@@ -198,7 +218,8 @@ def drain():
                 child = None
             continue
         _, title, new, area = msg
-        state["area"] = area
+        if area is not None:  # UIA 来源不带消息区，别把微信的坐标冲掉
+            state["area"] = area
         chat = chat_of(title)
         chat["rev"] += 1  # 这个会话有新消息了，它在跑的分析作废
         if title == ov.current_chat():  # 看的是别的会话就别把人家的候选划掉
@@ -261,6 +282,10 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     q = multiprocessing.Queue()
     capture_on = multiprocessing.Event()  # 父子进程共用的开关，置位=采集
     debug_on = multiprocessing.Event()  # 同上，置位=子进程往队列里送整帧给调试窗
+    uia_on = multiprocessing.Event()  # QQ / WhatsApp 的 UI 自动化采集，跟标题栏开关走
+    uia_on.set()
+    uia_child = multiprocessing.Process(target=uia_worker.run, args=(q, uia_on), daemon=True)
+    uia_child.start()
     ov = Overlay(on_fill=fill_reply, on_toggle_capture=on_toggle_capture,
                  on_target_change=on_target_change, on_toggle_debug=set_debug,
                  result_of=lambda t: chats.get(t, {}).get("result"))
@@ -274,7 +299,7 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
         child = spawn_worker()
     if settings.debug_view():  # 上次开着就直接开回来
         set_debug(True)
-    if not settings.has_jev_key():
+    if not settings.has_key():
         ov.set_status("请先在设置中配置模型", "warning")
         ov.after(0, ov.open_settings)
     if settings.check_update() and update.parse_version(VERSION):  # 开发版没有版本号，不查也不烦源码用户
@@ -285,3 +310,4 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     finally:
         if child is not None:
             child.terminate()
+        uia_child.terminate()
