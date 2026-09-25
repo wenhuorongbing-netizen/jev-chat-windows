@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 try:
-    from .draft import draft_bilingual, draft_candidates
+    from .draft import draft_bilingual, draft_candidates, her_latest, is_chinese
     from .jev_client import JevError, ask
     from .questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
 except ImportError:
-    from draft import draft_bilingual, draft_candidates
+    from draft import draft_bilingual, draft_candidates, her_latest, is_chinese
     from jev_client import JevError, ask
     from questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
 
@@ -105,18 +105,29 @@ def analyze(messages: list, relationship: str, model: str | None = None,
 
 
 
-def analyze_bilingual(messages: list, relationship: str, lang: str, model: str | None = None,
+def analyze_bilingual(messages: list, relationship: str, model: str | None = None,
                       timeout: float = 30, context: int = 10, provider: str = "deepseek",
                       base_url: str | None = None, reply_to: str | None = None, style: str = "",
                       thinking: bool = False) -> dict:
-    """双语模式：不调 Jev，一次起草拿到「对方说了啥（中文）+ 3 条 lang 回复（带中文对照）」。
-    返回跟 analyze() 同形状，多 translation / glosses 两个字段；第一条就是推荐。"""
-    r = draft_bilingual(messages, relationship, lang, provider=provider, model=model,
+    """智能回复（跟随对方语言），不调 Jev，只要起草那把 key：
+    对方说中文 → 原来的中文起草（口吻规则最全），不翻译；
+    对方说外语 → 一次调用拿到「语言 + 中文翻译 + 3 条同语言回复（带中文对照）」。
+    返回跟 analyze() 同形状，多 lang / translation / glosses；第一条就是推荐。"""
+    if is_chinese(her_latest(messages)):
+        cands = draft_candidates(messages, relationship, provider=provider, model=model,
+                                 base_url=base_url, timeout=timeout, keep=context,
+                                 reply_to=reply_to, style=style, thinking=thinking)
+        if not cands:
+            raise JevError("起草结果没有可用候选回复")
+        return {"candidates": cands, "best_index": 0, "best_reply": cands[0], "scores": [],
+                "answers": {}, "usage": {}, "reply_to": reply_to,
+                "lang": "中文", "translation": "", "glosses": []}
+    r = draft_bilingual(messages, relationship, provider=provider, model=model,
                         base_url=base_url, timeout=timeout, keep=context, reply_to=reply_to,
                         style=style, thinking=thinking)
     return {"candidates": r["candidates"], "best_index": 0, "best_reply": r["candidates"][0],
             "scores": [], "answers": {}, "usage": {}, "reply_to": reply_to,
-            "translation": r["translation"], "glosses": r["glosses"]}
+            "lang": r["lang"] or "外语", "translation": r["translation"], "glosses": r["glosses"]}
 
 
 if __name__ == "__main__":

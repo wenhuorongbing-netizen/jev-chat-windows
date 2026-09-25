@@ -113,7 +113,7 @@ def analyze_bg(msgs, title, revision, reply_to=None):
     """后台线程只跑网络调用，结果丢队列；UI 只在主线程的 tick 里动（Qt 不能跨线程碰）。"""
     try:
         if settings.bilingual():
-            results.put(("ok", analyze_bilingual(msgs, settings.relationship(), settings.bilingual_lang(),
+            results.put(("ok", analyze_bilingual(msgs, settings.relationship(),
                                                  context=settings.context(),
                                                  model=settings.draft_model() or None,
                                                  provider=settings.draft_provider(),

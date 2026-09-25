@@ -85,9 +85,9 @@ def check_update() -> bool:
     return bool(_read("check_update", True))
 
 def bilingual() -> bool:
-    """双语模式：对方消息翻成中文 + 用 bilingual_lang() 写 3 条回复（带中文对照），填入只填外语。
-    开了就不调 Jev，只要起草那把 key。默认关。"""
-    return bool(_read("bilingual", False))
+    """智能回复（跟随对方语言）：对方说中文就中文回；说外语就翻成中文给你看，3 条回复用对方的语言写
+    （带中文对照），填入只填外语。开了就不调 Jev，只要起草那把 key。默认开。"""
+    return bool(_read("bilingual", True))
 
 def bilingual_lang() -> str:
     """双语模式下回复用的语言，默认德语。"""

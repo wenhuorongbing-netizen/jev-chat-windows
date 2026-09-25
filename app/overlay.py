@@ -545,20 +545,17 @@ class Overlay:
             "开了以后群聊里可以选回复给谁，候选会针对 TA 写，填入时可带 @。关了就正常回复。"
         ))
         bilingual_row = QHBoxLayout()
-        bilingual_row.addWidget(_label("双语模式（翻译 + 外语回复）", 13), 1)
+        bilingual_row.addWidget(_label("智能回复（跟随对方语言）", 13), 1)
         self.bilingualSwitch = SwitchButton()
         self.bilingualSwitch.setOnText("开")
         self.bilingualSwitch.setOffText("关")
-        self.bilingualSwitch.setAccessibleName("双语模式")
+        self.bilingualSwitch.setAccessibleName("智能回复（跟随对方语言）")
+        self.bilingualSwitch.checkedChanged.connect(lambda on: self.jevBox.setVisible(not on))
         bilingual_row.addWidget(self.bilingualSwitch)
         box.addLayout(bilingual_row)
-        self.langEdit = LineEdit()
-        self.langEdit.setPlaceholderText("回复语言，例如：德语、英语")
-        self.langEdit.setAccessibleName("双语模式的回复语言")
-        box.addWidget(self.langEdit)
         box.addWidget(self._hint(
-            "开了以后对方的消息翻成中文给你看，3 条候选用上面的语言写并附中文意思，填入只填外语。"
-            "这个模式不调 Jev，只要「起草」那把 key。"
+            "对方说中文就用中文回；说德语、英语等外语就翻成中文给你看，3 条回复用对方的语言写并附中文意思，"
+            "填入只填外语。只要「起草」那把 key，不用 Jev / OpenRouter。关掉则用 Jev 判断 + 排序（要两把 key）。"
         ))
         update_row = QHBoxLayout()
         update_row.addWidget(_label("启动时检查更新", 13), 1)
@@ -593,10 +590,15 @@ class Overlay:
         box.addWidget(_label("模型", 16, "#304c3c", True))
         self._fetched = _Fetched()
         self._fetched.done.connect(self._models_fetched)
-        self.jev = self._model_group(box, "判断 · Jev", "jev", providers.JEV_PROVIDERS)
-        box.addWidget(self._hint(
-            "判断意图、紧张度，并给三条候选排序。两家给的是同一个 Jev，必填。"
+        self.jevBox = QWidget()  # 智能回复模式用不到 Jev，整组藏起来
+        jev_box = QVBoxLayout(self.jevBox)
+        jev_box.setContentsMargins(0, 0, 0, 0)
+        jev_box.setSpacing(12)
+        self.jev = self._model_group(jev_box, "判断 · Jev", "jev", providers.JEV_PROVIDERS)
+        jev_box.addWidget(self._hint(
+            "判断意图、紧张度，并给三条候选排序。只有关掉「智能回复」时才需要。"
         ))
+        box.addWidget(self.jevBox)
         self.draft = self._model_group(box, "起草 · 语言模型", "draft", providers.DRAFT_PROVIDERS)
         box.addWidget(self._hint(
             "写那三条候选。OpenAI / Anthropic / Gemini 三种接口都走各自官方 SDK。"
@@ -797,7 +799,7 @@ class Overlay:
         self.contextBox.setValue(settings.context())
         self.targetSwitch.setChecked(settings.reply_target())
         self.bilingualSwitch.setChecked(settings.bilingual())
-        self.langEdit.setText(settings.bilingual_lang())
+        self.jevBox.setVisible(not settings.bilingual())
         self._set_group(self.jev, settings.jev_provider(), settings.jev_model())
         self._set_group(self.draft, settings.draft_provider(), settings.draft_model())
         self.baseEdit.setText(settings.draft_base_url())
@@ -846,8 +848,7 @@ class Overlay:
                           style_text=self.styleEdit.text().strip(),
                           thinking_on=self.thinkingSwitch.isChecked(),
                           check_update_on=self.updateSwitch.isChecked(),
-                          bilingual_on=bilingual,
-                          bilingual_lang_text=self.langEdit.text().strip() or "德语")
+                          bilingual_on=bilingual)
         except Exception:
             self._settings_feedback("保存失败，请检查配置文件是否可写后重试。", error=True)
             return
@@ -1161,10 +1162,15 @@ class Overlay:
             self.replyBox.addWidget(card)
             self.cards.append(card)
         reply_to = result.get("reply_to")
-        if "translation" in result:  # 双语模式：没有 Jev 判断，这张卡改放对方消息的中文翻译
-            self.insightTitle.setText("对方说（中文）" + (f" · 回复给 {reply_to}" if reply_to else ""))
-            self.summary.setText(result.get("translation") or "（没有翻译）")
-            self.intent.setText(f"候选用{settings.bilingual_lang()}写，灰字是中文意思；填入只填{settings.bilingual_lang()}")
+        if "translation" in result:  # 智能回复：没有 Jev 判断，这张卡放对方语言 + 中文翻译
+            lang = result.get("lang") or "外语"
+            self.insightTitle.setText(f"对方用{lang}" + (f" · 回复给 {reply_to}" if reply_to else ""))
+            if result.get("translation"):
+                self.summary.setText(result["translation"])
+                self.intent.setText(f"候选也用{lang}写，灰字是中文意思；填入只填{lang}")
+            else:
+                self.summary.setText("中文对话，直接给中文回复")
+                self.intent.setText("")
             self.tension.setText("")
             self._finish_show()
             return
