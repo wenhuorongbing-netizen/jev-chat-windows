@@ -226,7 +226,7 @@ class _ReplyCard(_Surface):
 
 class Overlay:
     def __init__(self, on_fill, on_toggle_capture=None, on_target_change=None, result_of=None,
-                 on_toggle_debug=None):
+                 on_toggle_debug=None, on_generate=None):
         """result_of(会话名) → 那个会话上次的结果或 None；切着看别的会话时用它把旧结果放回来。
         on_target_change(会话名, 人名) → 用户在群里挑了回复对象。
         on_toggle_debug(开不开) → 开关调试视图那个独立窗口。"""
@@ -237,6 +237,7 @@ class Overlay:
         self.on_toggle_capture = on_toggle_capture
         self.on_target_change = on_target_change
         self.on_toggle_debug = on_toggle_debug
+        self.on_generate = on_generate  # on_generate(会话名)：不等对方新消息，按现有记录马上生成
         self.result_of = result_of
         self.cands = []
         self.glosses = []  # 双语模式：每条候选的中文对照，跟 cands 同索引
@@ -411,6 +412,12 @@ class Overlay:
         body.addWidget(self.targetRow)
         self.status = _label("", 12, _MUTED)
         body.addWidget(self.status)
+        self.generateButton = PushButton("立即生成回复")
+        self.generateButton.setAccessibleName("立即生成回复")
+        self.generateButton.setToolTip("不等对方发新消息，按当前会话已有的聊天记录马上给 3 条建议")
+        self.generateButton.clicked.connect(
+            lambda: self.on_generate and self._shown and self.on_generate(self._shown))
+        body.addWidget(self.generateButton)
         self.progress = IndeterminateProgressBar()
         self.progress.setFixedHeight(3)
         self.progress.hide()

@@ -26,7 +26,65 @@ from core.engine import analyze, analyze_bilingual
 # senders：这个群里发过言的人，去重、最近的排最前；target：用户挑的回复对象（None = 跟着最近那个走）
 chats = {}
 state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": "",
-         "uia": {}}  # uia: {会话名: (hwnd, 输入框屏幕坐标)}，QQ / WhatsApp 的会话填入走这里
+         "uia": {},  # uia: {会话名: (hwnd, 输入框屏幕坐标)}，QQ / WhatsApp 的会话填入走这里
+         "app_chat": {},  # {App: 那个 App 当前开着的会话}，三个 App 各报各的
+         "fg_app": None, "fg_at": 0.0}  # 最近一次在前台的是哪个 App；界面只跟它
+
+_FG_EXES = {"weixin.exe": "wechat", "wechat.exe": "wechat", "qq.exe": "qq",
+            "whatsapp.root.exe": "whatsapp", "whatsapp.exe": "whatsapp"}
+
+
+def app_of(title):
+    """会话名 → 来自哪个 App（UIA 来源带前缀，其余是微信）。"""
+    if title.startswith("QQ · "):
+        return "qq"
+    if title.startswith("WhatsApp · "):
+        return "whatsapp"
+    return "wechat"
+
+
+def foreground_app():
+    """前台窗口是三个聊天 App 之一就返回它；是别的（包括助手自己）返回 None，界面保持不动。"""
+    import os
+
+    u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    pid = ctypes.c_ulong()
+    u32.GetWindowThreadProcessId(u32.GetForegroundWindow(), ctypes.byref(pid))
+    h = k32.OpenProcess(0x1000, False, pid.value)
+    if not h:
+        return None
+    buf, size = ctypes.create_unicode_buffer(1024), ctypes.c_uint(1024)
+    ok = k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+    k32.CloseHandle(h)
+    return _FG_EXES.get(os.path.basename(buf.value).lower()) if ok else None
+
+
+def follow_foreground():
+    """每 300ms 看一眼前台：切到了哪个聊天 App，界面就跟到那个 App 当前的会话。"""
+    import time
+
+    now = time.monotonic()
+    if now - state["fg_at"] < 0.3:
+        return
+    state["fg_at"] = now
+    app = foreground_app()
+    if app and app != state["fg_app"]:
+        state["fg_app"] = app
+        title = state["app_chat"].get(app)
+        if title:
+            ov.set_chat(title)
+
+
+def generate_now(title):
+    """「立即生成回复」：不管最后一句是谁说的，按这个会话已有的记录生成。"""
+    msgs = list(chat_of(title)["history"])
+    if not msgs:
+        ov.set_status("这个会话还没读到聊天记录", "warning")
+        return
+    if state["busy"]:
+        state["rerun"] = (title, msgs)
+        return
+    start_analyze(title, msgs)
 results = queue.Queue()
 update_result = queue.Queue()  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
 
@@ -185,9 +243,12 @@ def drain():
         if kind == "area":  # 只是窗口挪了位置，坐标跟着更新，别的什么都不用动
             state["area"] = msg[1]
             continue
-        if kind == "chat":  # 微信切了会话，界面跟过去（用户正浏览别的会话时也跟，微信是准的）
-            state["chat"] = msg[1]
-            ov.set_chat(msg[1])
+        if kind == "chat":  # 某个 App 切了会话：记下来；只有它是当前前台 App（或还没判断过前台）才让界面跟过去
+            app = app_of(msg[1])
+            state["app_chat"][app] = msg[1]
+            if state["fg_app"] in (None, app):
+                state["chat"] = msg[1]
+                ov.set_chat(msg[1])
             continue
         if kind == "debug":  # 调试视图的一帧；窗口不在就直接丢掉
             if dbg is not None:
@@ -248,6 +309,7 @@ def drain():
 def tick():
     try:
         drain()
+        follow_foreground()
         while not update_result.empty():
             latest, url = update_result.get()
             ov.set_update(latest, url)
@@ -288,6 +350,7 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     uia_child.start()
     ov = Overlay(on_fill=fill_reply, on_toggle_capture=on_toggle_capture,
                  on_target_change=on_target_change, on_toggle_debug=set_debug,
+                 on_generate=generate_now,
                  result_of=lambda t: chats.get(t, {}).get("result"))
     child = dbg = None
     try:
