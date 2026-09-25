@@ -6,7 +6,22 @@
 import time
 import traceback
 
+from app import settings
 from app.uia import APPS, PARSERS, Dedup, _Tree, find_windows
+
+
+def _with_image(app, hwnd, msg, first):
+    """最新一条是对方发的图：换成 (who, name, text, base64 JPEG)；抓不到/没开/第一次读会话就是 None。"""
+    who, nm, text, pic = msg
+    img = None
+    if who == "her" and pic and not first and settings.read_images():
+        try:
+            from app.images import crop_window, qq_file_since
+
+            img = (qq_file_since(time.time()) if app == "qq" else None) or crop_window(hwnd, pic)
+        except Exception:
+            img = None  # 看不了图就当普通「[图片]」，别耽误出候选
+    return (who, nm, text, img)
 
 
 def run(q, enabled, interval=1.0):
@@ -57,7 +72,10 @@ def run(q, enabled, interval=1.0):
             if inputs.get(name) != (hwnd, point):
                 inputs[name] = (hwnd, point)
                 q.put(("uia_input", name, hwnd, point))
-            new = dedup.setdefault(name, Dedup()).new(msgs)
+            d = dedup.setdefault(name, Dedup())
+            new = d.new(msgs)
+            first, d.first = d.first, False
             if new:
+                new = [(who, nm, text, None) for who, nm, text, _ in new[:-1]] + [_with_image(app, hwnd, new[-1], first)]
                 q.put(("lines", name, new, None))
         time.sleep(max(0.2, interval - (time.perf_counter() - t0)))

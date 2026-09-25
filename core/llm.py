@@ -27,7 +27,7 @@ def _turns(user_turns: list[str], assistant: str = "assistant") -> list[dict]:
 def chat(protocol: str, base_url: str | None, api_key: str, model: str, system: str,
          user_turns: list[str], *, temperature: float = 1.0, max_tokens: int = 400,
          thinking: bool = False, extra_body: dict | None = None,
-         headers: dict | None = None, timeout: float = 30) -> str:
+         headers: dict | None = None, timeout: float = 30, image: str | None = None) -> str:
     """发一轮对话，返回模型输出的纯文本。
 
     user_turns: 用户/助手交替的文本，奇数条，首尾都是用户说的（追问补齐候选就是 3 条）。
@@ -40,13 +40,19 @@ def chat(protocol: str, base_url: str | None, api_key: str, model: str, system: 
     if protocol == "gemini":
         return _gemini(base_url, api_key, model, system, user_turns,
                        temperature, max_tokens, thinking, timeout)
+    # image（base64 JPEG）目前只有 OpenAI 协议带；Anthropic / Gemini 来源照旧只看文字
     return _openai(base_url, api_key, model, system, user_turns,
-                   temperature, max_tokens, extra_body, headers, timeout)
+                   temperature, max_tokens, extra_body, headers, timeout, image)
 
 
 def _openai(base_url, api_key, model, system, user_turns, temperature, max_tokens,
-            extra_body, headers, timeout) -> str:
+            extra_body, headers, timeout, image=None) -> str:
     import openai
+
+    turns = _turns(user_turns)
+    if image:  # 图挂在最后一条用户消息上：content 从字符串变成 [文字块, 图片块]
+        turns[-1]["content"] = [{"type": "text", "text": turns[-1]["content"]},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image}"}}]
 
     try:
         client = openai.OpenAI(base_url=base_url or None, api_key=api_key,
@@ -54,7 +60,7 @@ def _openai(base_url, api_key, model, system, user_turns, temperature, max_token
                                **({"default_headers": headers} if headers else {}))
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "system", "content": system}] + _turns(user_turns),
+            messages=[{"role": "system", "content": system}] + turns,
             temperature=temperature, max_tokens=max_tokens,
             stream=False,  # DeepSeek 要显式关；别家无所谓
             **({"extra_body": extra_body} if extra_body else {}))

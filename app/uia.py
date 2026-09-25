@@ -108,7 +108,7 @@ def _inside(r, box):
 
 
 def parse_qq(items):
-    """→ (会话名, [(who, name, text)], 输入框点击点 or None)。"""
+    """→ (会话名, [(who, name, text, 图片屏幕矩形 or None)], 输入框点击点 or None)。"""
     title, msgs, point = "", [], None
     speaker = None
     i = 0
@@ -120,18 +120,20 @@ def parse_qq(items):
             speaker = name.strip() or None
         elif "msg-content-container" in cls:
             who = "me" if "container--self" in cls else "her"
-            parts = []
+            parts, pic = [], None
             j = i + 1
             while j < len(items) and _inside(items[j][4], rect):
-                t, c, n, _, _ = items[j]
+                t, c, n, _, r = items[j]
                 if t == _TEXT and n.strip():
                     parts.append(n.strip())
                 elif t == _IMAGE and n.strip() in ("图片", "表情"):
                     parts.append(f"[{n.strip()}]")
+                    if "pic-element" in c:
+                        pic = r
                 j += 1
             text = "".join(parts).strip()
             if text:
-                msgs.append((who, speaker if who == "her" else None, text))
+                msgs.append((who, speaker if who == "her" else None, text, pic))
             i = j
             continue
         elif aid == "id-func-bar-expression":  # 表情按钮那一排下面就是输入框
@@ -162,7 +164,7 @@ def parse_whatsapp(items):
                 j += 1
             text = " ".join(parts).strip()
             if text:
-                msgs.append((who, None, text))
+                msgs.append((who, None, text, None))
             i = j
             continue
         i += 1
@@ -180,16 +182,24 @@ def parse_whatsapp(items):
 PARSERS = {"qq": parse_qq, "whatsapp": parse_whatsapp}
 
 
+def _key(m):
+    """去重用的键：谁 + 文字；图片消息文字都是「[图片]」，再带上图的尺寸，不然第二张图会被当成见过的。"""
+    pic = m[3] if len(m) > 3 else None
+    return (m[0], m[2], (pic[2] - pic[0], pic[3] - pic[1]) if pic else None)
+
+
 class Dedup:
     """一个会话一个：跟 app/ocr.Reader.new_lines 同一套规则，只是文字是精确的，不用模糊比。"""
 
     def __init__(self):
         self.seen = []
+        self.first = True  # 第一次读这个会话：屏幕上的全是旧消息，只当上下文，不去抓图
 
     def new(self, msgs):
-        known = [k for k, (w, _, t) in enumerate(msgs) if (w, t) in self.seen]
+        keys = [_key(m) for m in msgs]
+        known = [k for k, key in enumerate(keys) if key in self.seen]
         floor = max(known) if known else -1
-        out = [m for k, m in enumerate(msgs) if k > floor and (m[0], m[2]) not in self.seen]
-        self.seen.extend((w, t) for w, _, t in msgs if (w, t) not in self.seen)
+        out = [m for k, m in enumerate(msgs) if k > floor and keys[k] not in self.seen]
+        self.seen.extend(key for key in keys if key not in self.seen)
         del self.seen[:-800]
         return out

@@ -174,6 +174,18 @@ def on_toggle_capture(on):
     capture_on.set()
 
 
+def latest_image(title, msgs):
+    """对方最后连着说的那几条里要是有图，返回它；更早的图不带（跟当前回复多半没关系，还费钱）。"""
+    pic = chat_of(title).get("image")
+    if not pic or not msgs:
+        return None
+    start = len(msgs)
+    while start > 0 and msgs[start - 1][0] == "her":
+        start -= 1
+    at, data = pic
+    return data if start < at <= len(msgs) and len(msgs) == len(chat_of(title)["history"]) else None
+
+
 def analyze_bg(msgs, title, revision, reply_to=None):
     """后台线程只跑网络调用，结果丢队列；UI 只在主线程的 tick 里动（Qt 不能跨线程碰）。"""
     group = len({m[2] for m in msgs if m[0] == "her" and len(m) > 2 and m[2]}) >= 2  # 两个以上发言人 = 群聊
@@ -186,7 +198,8 @@ def analyze_bg(msgs, title, revision, reply_to=None):
                                                  provider=settings.draft_provider(),
                                                  base_url=settings.draft_base_url() or None,
                                                  reply_to=reply_to, style=settings.style(),
-                                                 thinking=settings.thinking()),
+                                                 thinking=settings.thinking(),
+                                                 image=latest_image(title, msgs)),
                          title, revision))
             return
         results.put(("ok", analyze(msgs, rel, context=settings.context(),
@@ -294,8 +307,11 @@ def drain():
         chat["rev"] += 1  # 这个会话有新消息了，它在跑的分析作废
         if title == ov.current_chat():  # 看的是别的会话就别把人家的候选划掉
             ov.invalidate_replies()
-        for who, name, text in new:
+        for item in new:
+            who, name, text = item[:3]
             chat["history"].append((who, text, name))
+            if who == "her" and len(item) > 3 and item[3]:  # 对方发的图（UIA 那边抓好的 base64），记下是第几条
+                chat["image"] = (len(chat["history"]), item[3])
             ov.log_message(who, text, name, chat=title)
             if who == "her" and name:  # 群里发过言的人，去重后最近的排最前
                 if name in chat["senders"]:

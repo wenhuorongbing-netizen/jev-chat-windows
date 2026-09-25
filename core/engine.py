@@ -108,21 +108,23 @@ def analyze(messages: list, relationship: str, model: str | None = None,
 def analyze_bilingual(messages: list, relationship: str, model: str | None = None,
                       timeout: float = 30, context: int = 10, provider: str = "deepseek",
                       base_url: str | None = None, reply_to: str | None = None, style: str = "",
-                      thinking: bool = False) -> dict:
+                      thinking: bool = False, image: str | None = None) -> dict:
     """智能回复（跟随对方语言），不调 Jev，只要起草那把 key：
     对方说中文 → 原来的中文起草（口吻规则最全），不翻译；
     对方说外语 → 一次调用拿到「语言 + 中文翻译 + 3 条同语言回复（带中文对照）」。
     返回跟 analyze() 同形状，多 lang / translation / glosses；第一条就是推荐。"""
-    if is_chinese(her_latest(messages)):
+    her = her_latest(messages)
+    # 只发了图、没说话：没有语言可认，按中文走（图里的外文模型自己看得懂）
+    if is_chinese(her) or not her.replace("[图片]", "").replace("[表情]", "").strip():
         cands = draft_candidates(messages, relationship, provider=provider, model=model,
                                  base_url=base_url, timeout=timeout, keep=context,
-                                 reply_to=reply_to, style=style, thinking=thinking)
+                                 reply_to=reply_to, style=style, thinking=thinking, image=image)
         if not cands:
             raise JevError("起草结果没有可用候选回复")
         return {"candidates": cands, "best_index": 0, "best_reply": cands[0], "scores": [],
                 "answers": {}, "usage": {}, "reply_to": reply_to,
                 "lang": "中文", "translation": "", "glosses": []}
-    r = draft_bilingual(messages, relationship, provider=provider, model=model,
+    r = draft_bilingual(messages, relationship, provider=provider, model=model, image=image,
                         base_url=base_url, timeout=timeout, keep=context, reply_to=reply_to,
                         style=style, thinking=thinking)
     return {"candidates": r["candidates"], "best_index": 0, "best_reply": r["candidates"][0],

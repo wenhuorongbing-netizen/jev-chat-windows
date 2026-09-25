@@ -675,6 +675,18 @@ class Overlay:
             "对方说中文就用中文回；说德语、英语等外语就翻成中文给你看，3 条回复用对方的语言写并附中文意思，"
             "填入只填外语。只要「起草」那把 key，不用 Jev / OpenRouter。关掉则用 Jev 判断 + 排序（要两把 key）。"
         ))
+        images_row = QHBoxLayout()
+        images_row.addWidget(_label("识别对方发来的图片", 13), 1)
+        self.imagesSwitch = SwitchButton()
+        self.imagesSwitch.setOnText("开")
+        self.imagesSwitch.setOffText("关")
+        self.imagesSwitch.setAccessibleName("识别对方发来的图片")
+        images_row.addWidget(self.imagesSwitch)
+        box.addLayout(images_row)
+        box.addWidget(self._hint(
+            "对方最新发的是图片时，把这张图（QQ 优先用原图，否则截窗口里那块）缩小后一起发给起草模型看。"
+            "只发最新一张，不存盘。关掉则图片只算「[图片]」。"
+        ))
         update_row = QHBoxLayout()
         update_row.addWidget(_label("启动时检查更新", 13), 1)
         self.updateSwitch = SwitchButton()
@@ -917,6 +929,7 @@ class Overlay:
         self.contextBox.setValue(settings.context())
         self.targetSwitch.setChecked(settings.reply_target())
         self.bilingualSwitch.setChecked(settings.bilingual())
+        self.imagesSwitch.setChecked(settings.read_images())
         self.jevBox.setVisible(not settings.bilingual())
         self._set_group(self.jev, settings.jev_provider(), settings.jev_model())
         self._set_group(self.draft, settings.draft_provider(), settings.draft_model())
@@ -966,7 +979,8 @@ class Overlay:
                           style_text=self.styleEdit.text().strip(),
                           thinking_on=self.thinkingSwitch.isChecked(),
                           check_update_on=self.updateSwitch.isChecked(),
-                          bilingual_on=bilingual)
+                          bilingual_on=bilingual,
+                          read_images_on=self.imagesSwitch.isChecked())
         except Exception:
             self._settings_feedback("保存失败，请检查配置文件是否可写后重试。", error=True)
             return

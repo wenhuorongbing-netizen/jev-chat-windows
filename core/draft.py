@@ -157,7 +157,7 @@ def draft_candidates(messages: list, relationship: str, provider: str = "deepsee
                      model: str | None = None, base_url: str | None = None,
                      timeout: float = 30, keep: int = 10,
                      reply_to: str | None = None, style: str = "", thinking: bool = False,
-                     guidance: str | None = None) -> list[str]:
+                     guidance: str | None = None, image: str | None = None) -> list[str]:
     """messages: [(from, text)] 或 [(from, text, name)]，from ∈ {her, me}，name = 群里的发言人；
     只看最近 keep 条。返回最多 3 条中文候选（过滤后可能是 0 条，调用方要处理）。
 
@@ -186,6 +186,8 @@ def draft_candidates(messages: list, relationship: str, provider: str = "deepsee
         user += f"\n\n这是群聊。你要回复的是「{reply_to}」的话，三条候选都对 TA 说，不要@别人。"
     if guidance and guidance.strip():
         user += f"\n\n{guidance.strip()}"
+    if image:
+        user += "\n\n对方最新发的「[图片]」就是附带的这张图，先看懂图里是什么，再结合它回复。"
     user += "\n\n输出恰好 3 条候选，JSON 数组，每条一句。"
     key = _api_key(LLM_ENV)  # 起草只有这一把 key，换来源不用重填
     # 1.2：DeepSeek 自己推荐的闲聊档位，0.8 出来的话太板正
@@ -195,7 +197,10 @@ def draft_candidates(messages: list, relationship: str, provider: str = "deepsee
         temperature=1.2, max_tokens=4000 if thinking else 400, thinking=thinking,
         extra_body=spec.extra(thinking), headers=spec.headers, timeout=timeout)
 
-    content = call([user])
+    content = _with_image_fallback(lambda img: call([user]) if img is None else chat(
+        spec.protocol, base_url or spec.base, key, model or spec.default, SYSTEM, [user],
+        temperature=1.2, max_tokens=4000 if thinking else 400, thinking=thinking,
+        extra_body=spec.extra(thinking), headers=spec.headers, timeout=timeout, image=img), image)
     her_recent = _her_recent(messages)
     cands = _sanitize(_parse_candidates(content), suspects, her_recent)
     if len(cands) < 3:
@@ -275,10 +280,20 @@ def _parse_bilingual(content: str) -> dict:
             "candidates": cands[:3], "glosses": glosses[:3]}
 
 
+def _with_image_fallback(send, image):
+    """先带图发；模型不认图（纯文字模型、别家协议）报错了，就去掉图再发一次，别让一张图把整次生成搞挂。"""
+    if image:
+        try:
+            return send(image)
+        except JevError:
+            pass
+    return send(None)
+
+
 def draft_bilingual(messages: list, relationship: str, provider: str = "deepseek",
                     model: str | None = None, base_url: str | None = None,
                     timeout: float = 30, keep: int = 10, reply_to: str | None = None,
-                    style: str = "", thinking: bool = False) -> dict:
+                    style: str = "", thinking: bool = False, image: str | None = None) -> dict:
     """对方说外语时，一次调用：认出语言 L + 对方最新消息的中文翻译 + 3 条用 L 写的回复（各带中文对照）。
     不走 Jev，只要起草那把 key。返回 {"lang", "translation", "candidates", "glosses"}，候选按推荐度排好。"""
     spec = DRAFT_PROVIDERS[provider]
@@ -289,11 +304,14 @@ def draft_bilingual(messages: list, relationship: str, provider: str = "deepseek
         user += f"\n\n我对自己口吻的描述：{style.strip()}"
     if reply_to:
         user += f"\n\n这是群聊。你要回复的是「{reply_to}」的话，三条都对 TA 说。"
+    if image:
+        user += "\n\n对方最新发的「[图片]」就是附带的这张图：translation 里用中文简单说明图里是什么，回复要结合图的内容。"
     user += "\n\n认出对方的语言，翻译对方最新的消息，并用同一种语言给出 3 条回复，按要求输出 JSON。"
-    content = chat(spec.protocol, base_url or spec.base, _api_key(LLM_ENV), model or spec.default,
-                   BILINGUAL_SYSTEM, [user], temperature=0.9,
-                   max_tokens=4000 if thinking else 900, thinking=thinking,
-                   extra_body=spec.extra(thinking), headers=spec.headers, timeout=timeout)
+    content = _with_image_fallback(lambda img: chat(
+        spec.protocol, base_url or spec.base, _api_key(LLM_ENV), model or spec.default,
+        BILINGUAL_SYSTEM, [user], temperature=0.9, max_tokens=4000 if thinking else 900,
+        thinking=thinking, extra_body=spec.extra(thinking), headers=spec.headers,
+        timeout=timeout, image=img), image)
     return _parse_bilingual(content)
 
 
