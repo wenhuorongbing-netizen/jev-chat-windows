@@ -167,9 +167,11 @@ def on_toggle_capture(on):
 
 def analyze_bg(msgs, title, revision, reply_to=None):
     """后台线程只跑网络调用，结果丢队列；UI 只在主线程的 tick 里动（Qt 不能跨线程碰）。"""
+    group = len({m[2] for m in msgs if m[0] == "her" and len(m) > 2 and m[2]}) >= 2  # 两个以上发言人 = 群聊
+    rel = settings.relationship_for(title, group)
     try:
         if settings.bilingual():
-            results.put(("ok", analyze_bilingual(msgs, settings.relationship(),
+            results.put(("ok", analyze_bilingual(msgs, rel,
                                                  context=settings.context(),
                                                  model=settings.draft_model() or None,
                                                  provider=settings.draft_provider(),
@@ -178,7 +180,7 @@ def analyze_bg(msgs, title, revision, reply_to=None):
                                                  thinking=settings.thinking()),
                          title, revision))
             return
-        results.put(("ok", analyze(msgs, settings.relationship(), context=settings.context(),
+        results.put(("ok", analyze(msgs, rel, context=settings.context(),
                                    model=settings.draft_model() or None,
                                    provider=settings.draft_provider(),
                                    base_url=settings.draft_base_url() or None,

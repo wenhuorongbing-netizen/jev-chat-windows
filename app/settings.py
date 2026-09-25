@@ -17,7 +17,7 @@ from core.providers import CUSTOM, DRAFT_PROVIDERS, JEV_ENV, JEV_PROVIDERS, LEGA
 _ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
          else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _CONFIG = os.path.join(_ROOT, "config.json")
-_DEFAULT_RELATIONSHIP = "romantic partners"
+_DEFAULT_RELATIONSHIP = "auto"  # 自动判断：让模型按聊天内容自己看关系和语气
 _DEFAULT_CONTEXT = 10
 _DEFAULT_JEV = "openrouter"
 _DEFAULT_DRAFT = "deepseek"
@@ -33,7 +33,38 @@ def _read(name: str, default=None):
     return default if value is None else value
 
 def relationship() -> str:
+    """默认关系（没单独设过的会话用它）。"auto" = 自动判断。"""
     return str(_read("relationship") or _DEFAULT_RELATIONSHIP)
+
+def chat_relationship(title: str) -> str:
+    """某个会话单独设的关系；没设过返回 ""（= 用默认）。"""
+    rels = _read("chat_rel", {})
+    return str(rels.get(title) or "") if isinstance(rels, dict) else ""
+
+def set_chat_relationship(title: str, value: str) -> None:
+    """给一个会话单独记关系；value 为空 = 删掉，回到默认。只改这一项，别的设置原样。"""
+    try:
+        with open(_CONFIG, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    rels = data.get("chat_rel") if isinstance(data.get("chat_rel"), dict) else {}
+    if value:
+        rels[title] = value
+    else:
+        rels.pop(title, None)
+    data["chat_rel"] = rels
+    with open(_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+def relationship_for(title: str, group: bool = False) -> str:
+    """喂给模型的关系描述：会话单独设的 > 默认；是「自动」就让模型自己判断，群聊给个提示。"""
+    rel = chat_relationship(title) or relationship()
+    if rel != "auto":
+        return rel
+    if group:
+        return "group chat (several people); infer each person's relationship to me and a fitting tone from the conversation"
+    return "not specified; infer our relationship and a fitting tone from the conversation itself"
 
 def context() -> int:
     """参考上下文条数：起草和判断各看最近多少条消息。3~30，缺失/脏数据一律退默认值。"""
@@ -200,6 +231,7 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "thinking": flag(thinking_on, thinking),
         "check_update": flag(check_update_on, check_update),
         "debug_view": flag(debug_view_on, debug_view),
+        "chat_rel": _read("chat_rel", {}),  # 每个会话单独设的关系，由 set_chat_relationship 管，这里原样留着
         "bilingual": flag(bilingual_on, bilingual),
         "dock": flag(dock_on, dock),
         "bilingual_lang": keep(bilingual_lang_text, "bilingual_lang"),

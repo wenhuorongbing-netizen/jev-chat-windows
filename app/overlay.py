@@ -33,8 +33,13 @@ _LOG_LINES = 300
 _MUTED = "#68776f"
 _GREEN = "#18794e"
 _RELATIONSHIPS = [
-    ("恋人", "romantic partners"), ("朋友", "friends"), ("同事", "colleagues"),
+    ("自动判断", "auto"), ("恋人", "romantic partners"), ("朋友", "friends"), ("同事", "colleagues"),
     ("家人", "family"), ("自定义", None),
+]
+# 面板上每个会话单独选的关系（没有「自定义」：要写长描述去设置页改默认）
+_CHAT_RELATIONSHIPS = [
+    ("自动", ""), ("恋人", "romantic partners"), ("朋友", "friends"), ("同事", "colleagues"),
+    ("家人", "family"), ("群友", "group chat with acquaintances"), ("客户", "a client / customer I serve"),
 ]
 
 
@@ -415,6 +420,18 @@ class Overlay:
         self.progress.hide()
         body.addWidget(self.progress)
 
+        rel_row = QHBoxLayout()
+        rel_row.setSpacing(6)
+        rel_row.addWidget(_label("关系", 12, _MUTED))
+        self.relBox = ComboBox()
+        self.relBox.setMinimumWidth(0)
+        self.relBox.addItems([name for name, _ in _CHAT_RELATIONSHIPS])
+        self.relBox.setAccessibleName("这个会话的关系")
+        self.relBox.setToolTip("只对当前会话生效，会一直记着。「自动」= 按聊天内容自己判断；默认值在设置里改")
+        self.relBox.currentIndexChanged.connect(self._on_rel_selected)
+        rel_row.addWidget(self.relBox, 1)
+        body.addLayout(rel_row)
+
         self.targetRow = QWidget()  # 只有开了「群聊指定回复对象」且这个会话是群聊才露出来
         target_row = QHBoxLayout(self.targetRow)
         target_row.setContentsMargins(0, 0, 0, 0)
@@ -557,7 +574,7 @@ class Overlay:
         box.setContentsMargins(16, 16, 16, 18)
         box.setSpacing(12)
         box.addWidget(_label("回复偏好", 16, "#304c3c", True))
-        relation_label = _label("你们的关系", 13)
+        relation_label = _label("默认关系", 13)
         box.addWidget(relation_label)
         self.relationshipBox = ComboBox()
         self.relationshipBox.setMinimumWidth(0)
@@ -572,7 +589,7 @@ class Overlay:
         self.relationshipBox.currentIndexChanged.connect(
             lambda index: self.relEdit.setVisible(_RELATIONSHIPS[index][1] is None)
         )
-        box.addWidget(self._hint("帮助助手把握称呼、语气和回应分寸。"))
+        box.addWidget(self._hint("没单独设过的会话都用它。建议「自动判断」；某个会话不准，就在面板上的「关系」里单独选，会一直记着。"))
         style_label = _label("说话风格（可选）", 13)
         box.addWidget(style_label)
         self.styleEdit = LineEdit()
@@ -1132,6 +1149,7 @@ class Overlay:
         """换正在看的会话：记录、对方最近说、条数、上次的建议一起换过去。"""
         self._shown = title
         self._paint_badge(title)
+        self._load_rel(title)
         self.feed.clear()
         for line in self.feeds.get(title, []):
             self.feed.appendPlainText(line)
@@ -1141,6 +1159,23 @@ class Overlay:
         self._follow_text()
         self._render_targets()
         self.show_cached(self.result_of(title) if self.result_of else None)
+
+    def _load_rel(self, title):
+        """把这个会话单独设的关系放到小下拉上（屏蔽信号，别当成用户改的）。"""
+        value = settings.chat_relationship(title)
+        index = next((i for i, (_, v) in enumerate(_CHAT_RELATIONSHIPS) if v == value), 0)
+        self.relBox.blockSignals(True)
+        self.relBox.setCurrentIndex(index)
+        self.relBox.blockSignals(False)
+
+    def _on_rel_selected(self, index):
+        """用户给当前会话改了关系：记住，并按新关系马上重新生成。"""
+        if not self._shown:
+            return
+        settings.set_chat_relationship(self._shown, _CHAT_RELATIONSHIPS[index][1])
+        self.set_status(f"已记住：这个会话按「{_CHAT_RELATIONSHIPS[index][0]}」来写", "success")
+        if self.on_generate:
+            self.on_generate(self._shown)
 
     def set_targets(self, chat, senders, current):
         """某个会话的发言人名单（最近的在前）和当前回复对象；正看着它才重画。"""
