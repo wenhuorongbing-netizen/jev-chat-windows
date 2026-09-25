@@ -644,12 +644,12 @@ class Overlay:
         context_label = _label("参考上下文", 13)
         box.addWidget(context_label)
         self.contextBox = SpinBox()
-        self.contextBox.setRange(3, 30)
+        self.contextBox.setRange(3, 100)
         self.contextBox.setAccessibleName("参考的最近消息条数")
         context_label.setBuddy(self.contextBox)
         box.addWidget(self.contextBox)
         box.addWidget(self._hint(
-            "生成和判断时看最近这么多条消息。太少会丢上下文，太多会稀释重点，建议 6–12。"
+            "生成时看最近这么多条消息。太少看不懂在聊什么，建议 20–40；群聊可以再多些。"
         ))
         target_row = QHBoxLayout()
         target_row.addWidget(_label("群聊指定回复对象", 13), 1)
@@ -1318,8 +1318,9 @@ class Overlay:
             self.insightTitle.setText(f"对方说 · {lang}" + (f" · 回复给 {reply_to}" if reply_to else ""))
             self.summary.setText(result.get("translation") or "")
             self.summary.setVisible(bool(result.get("translation")))
-            self.intent.setText("")
-            self.intent.hide()
+            analysis = result.get("analysis") or ""
+            self.intent.setText(f"💡 {analysis}" if analysis else "")  # 模型怎么理解的：理解错了回复多半也跑偏
+            self.intent.setVisible(bool(analysis))
             self.tension.setText("")
             self._finish_show()
             return

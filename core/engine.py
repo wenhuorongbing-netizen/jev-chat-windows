@@ -116,20 +116,23 @@ def analyze_bilingual(messages: list, relationship: str, model: str | None = Non
     her = her_latest(messages)
     # 只发了图、没说话：没有语言可认，按中文走（图里的外文模型自己看得懂）
     if is_chinese(her) or not her.replace("[图片]", "").replace("[表情]", "").strip():
+        info = {}
         cands = draft_candidates(messages, relationship, provider=provider, model=model,
                                  base_url=base_url, timeout=timeout, keep=context,
-                                 reply_to=reply_to, style=style, thinking=thinking, image=image)
+                                 reply_to=reply_to, style=style, thinking=thinking, image=image,
+                                 info=info)
         if not cands:
             raise JevError("起草结果没有可用候选回复")
         return {"candidates": cands, "best_index": 0, "best_reply": cands[0], "scores": [],
-                "answers": {}, "usage": {}, "reply_to": reply_to,
+                "answers": {}, "usage": {}, "reply_to": reply_to, "analysis": info.get("analysis", ""),
                 "lang": "中文", "translation": "", "glosses": []}
     r = draft_bilingual(messages, relationship, provider=provider, model=model, image=image,
                         base_url=base_url, timeout=timeout, keep=context, reply_to=reply_to,
                         style=style, thinking=thinking)
     return {"candidates": r["candidates"], "best_index": 0, "best_reply": r["candidates"][0],
             "scores": [], "answers": {}, "usage": {}, "reply_to": reply_to,
-            "lang": r["lang"] or "外语", "translation": r["translation"], "glosses": r["glosses"]}
+            "lang": r["lang"] or "外语", "translation": r["translation"], "glosses": r["glosses"],
+            "analysis": r.get("analysis", "")}
 
 
 if __name__ == "__main__":

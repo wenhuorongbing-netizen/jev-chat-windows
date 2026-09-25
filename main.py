@@ -90,7 +90,7 @@ fill_errors = queue.Queue()  # 后台线程里填入失败的原因，tick 里�
 
 
 def chat_of(title):
-    return chats.setdefault(title, {"history": deque(maxlen=60), "result": None, "rev": 0,
+    return chats.setdefault(title, {"history": deque(maxlen=200), "result": None, "rev": 0,
                                     "target": None, "senders": []})
 
 

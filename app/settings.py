@@ -18,7 +18,7 @@ _ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
          else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _CONFIG = os.path.join(_ROOT, "config.json")
 _DEFAULT_RELATIONSHIP = "auto"  # 自动判断：让模型按聊天内容自己看关系和语气
-_DEFAULT_CONTEXT = 10
+_DEFAULT_CONTEXT = 30  # 10 条在群聊里常常连在聊什么都看不出来
 _DEFAULT_JEV = "openrouter"
 _DEFAULT_DRAFT = "deepseek"
 
@@ -67,12 +67,12 @@ def relationship_for(title: str, group: bool = False) -> str:
     return "not specified; infer our relationship and a fitting tone from the conversation itself"
 
 def context() -> int:
-    """参考上下文条数：起草和判断各看最近多少条消息。3~30，缺失/脏数据一律退默认值。"""
+    """参考上下文条数：起草和判断各看最近多少条消息。3~100，缺失/脏数据一律退默认值。"""
     try:
         n = int(_read("context", _DEFAULT_CONTEXT))
     except (TypeError, ValueError):
         return _DEFAULT_CONTEXT
-    return max(3, min(30, n))
+    return max(3, min(100, n))
 
 def style() -> str:
     """用户自己描述的说话风格（可选，自由文本），只喂给起草模型。默认空 = 只照着最近的消息模仿。"""
@@ -218,7 +218,7 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
             wrote_key = True
     if wrote_key:
         _notify_env()
-    n = context() if context_n is None else max(3, min(30, int(context_n)))
+    n = context() if context_n is None else max(3, min(100, int(context_n)))
     # 空串 = 清掉，None = 原样留着（读原始字段，别读补过默认值的那个）
     keep = lambda new, name: str(_read(name) or "") if new is None else str(new).strip()
     flag = lambda new, now: now() if new is None else bool(new)
