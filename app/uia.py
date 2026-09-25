@@ -44,7 +44,9 @@ def _exe_of(pid):
 
 
 def find_windows():
-    """→ {app: hwnd}：每个 App 取可见、没最小化、面积最大的顶层窗口（QQ 主窗口就是会话窗口）。"""
+    """→ {app: [hwnd, …]}：每个 App 所有可见、没最小化的顶层窗口，面积大的在前。
+    不能只取最大的那个：QQ 开着「视频通话」窗口时它比主窗口还大，里面没有聊天记录。
+    调用方挨个试，用第一个认得出聊天输入框的。"""
     found = {}
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -59,12 +61,12 @@ def find_windows():
                 r = ctypes.wintypes.RECT()
                 u32.GetWindowRect(hwnd, ctypes.byref(r))
                 area = (r.right - r.left) * (r.bottom - r.top)
-                if area > 200 * 200 and area > found.get(app, (0, 0))[1]:
-                    found[app] = (hwnd, area)
+                if area > 200 * 200:
+                    found.setdefault(app, []).append((area, hwnd))
         return True
 
     u32.EnumWindows(cb, 0)
-    return {app: h for app, (h, _) in found.items()}
+    return {app: [h for _, h in sorted(ws, reverse=True)] for app, ws in found.items()}
 
 
 class _Tree:
@@ -91,10 +93,13 @@ class _Tree:
         arr = root.FindAllBuildCache(4, self.true, self.cr)  # TreeScope_Descendants
         out = []
         for i in range(arr.Length):
-            e = arr.GetElement(i)
-            r = e.CachedBoundingRectangle
-            out.append((e.CachedControlType, e.CachedClassName or "", e.CachedName or "",
-                        e.CachedAutomationId or "", (r.left, r.top, r.right, r.bottom)))
+            try:
+                e = arr.GetElement(i)
+                r = e.CachedBoundingRectangle
+                out.append((e.CachedControlType, e.CachedClassName or "", e.CachedName or "",
+                            e.CachedAutomationId or "", (r.left, r.top, r.right, r.bottom)))
+            except Exception:  # 读的过程中这个元素没了（消息滚动/重绘，UIA_E_ELEMENTNOTAVAILABLE），跳过它
+                continue
         return out
 
 

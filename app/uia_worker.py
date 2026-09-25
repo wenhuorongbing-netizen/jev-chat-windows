@@ -26,17 +26,24 @@ def run(q, enabled, interval=1.0):
             wins = find_windows()
         except Exception:
             wins = {}
-        for app, hwnd in wins.items():
-            try:
-                items = tree.dump(hwnd, web_root=(app == "whatsapp"))
-                title, msgs, point = PARSERS[app](items)
-            except Exception:
-                if app not in warned:
-                    q.put(("status", f"{APPS[app][0]} 读取失败：" + " ".join(traceback.format_exc().split())[-160:]))
+        for app, hwnds in wins.items():
+            got, error = None, None
+            for hwnd in hwnds:  # 视频通话、图片查看之类的窗口没有输入框，跳过，用第一个聊天窗口
+                try:
+                    title, msgs, point = PARSERS[app](tree.dump(hwnd, web_root=(app == "whatsapp")))
+                except Exception:  # 窗口正在关/刚弹出，单个窗口读失败很正常，别急着报
+                    error = " ".join(traceback.format_exc().split())[-160:]
+                    continue
+                if point is not None:  # 没有输入框 = 不在聊天界面（会话列表、设置页……）
+                    got = (hwnd, title, msgs, point)
+                    break
+            if got is None:
+                if error and app not in warned:  # 一个聊天窗口都没读成，才告诉用户
+                    q.put(("status", f"{APPS[app][0]} 读取失败：{error}"))
                     warned.add(app)
                 continue
-            if point is None:  # 没有输入框 = 不在聊天界面（会话列表、设置页……）
-                continue
+            warned.discard(app)
+            hwnd, title, msgs, point = got
             name = f"{APPS[app][0]} · {title or '当前会话'}"
             if current.get(app) != name:
                 current[app] = name
