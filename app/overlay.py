@@ -9,7 +9,7 @@ from math import isfinite
 from types import SimpleNamespace
 
 import ctypes
-import ctypes.wintypes as _w
+import ctypes.wintypes
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPixmap
@@ -264,7 +264,8 @@ class Overlay:
         self._chat = ""  # 聊天 App 当前开着的会话
         self._shown = ""  # 界面上正在看的会话（浏览时和上面不一样）
         self.docked = settings.dock()  # 贴着当前聊天窗口；用户拖动标题栏就解除
-        self._dock_rect = None  # 上次贴靠算出来的物理像素矩形，没变就不动窗口
+        self._chat_hwnd = None  # 最近一个在前台的聊天窗口
+        self.on_foreground = None  # on_foreground(根窗口)：main.py 决定这个窗口算不算聊天 App
         self.win = _MainWindow(self._relayout)
         self.win.setObjectName("assistantWindow")
         self.win.setWindowTitle("JevChat-Windows")
@@ -347,6 +348,11 @@ class Overlay:
                         "idle" if settings.has_key() else "warning")
         self._paint_pin()
         self.win.show()
+        from app.dock import Docker
+
+        dpr = lambda: self.win.devicePixelRatioF() or 1.0  # noqa: E731
+        self.docker = Docker(self._hwnd(), self._width_px, lambda: int(480 * dpr()),
+                             on_foreground=lambda h: self.on_foreground and self.on_foreground(h))
 
     def _scroll_page(self):
         scroll = ScrollArea()
@@ -501,56 +507,26 @@ class Overlay:
         if on == self.docked:
             return
         self.docked = on
-        self._dock_rect = None
         settings.save(dock_on=on)
         self._paint_pin()
+        self.docker.set_enabled(on)
+        if on and self._chat_hwnd:
+            self.docker.attach(self._chat_hwnd)
 
     def _hwnd(self):
         return int(self.win.winId())
 
-    def dock_to(self, rect):
-        """rect = 聊天窗口的物理像素矩形 (l, t, r, b)。贴在它右边，放不下就左边，两边都不够就压在它右侧内沿；
-        高度跟它一样（不小于一个能看的最小值、不超出屏幕）。直接用 SetWindowPos 按物理像素摆，
-        不经过 Qt 的逻辑坐标——多显示器不同缩放时换算最容易错。"""
-        if not self.docked or self.win.isMinimized():
-            return
-        u32 = ctypes.windll.user32
-        l, t, r, b = rect
-        mon = u32.MonitorFromRect(ctypes.byref(_w.RECT(l, t, r, b)), 2)  # MONITOR_DEFAULTTONEAREST
+    def _width_px(self):
+        """贴靠时的物理宽度：用户用右下角拖柄改过宽度就沿用，没改过就是 360 逻辑像素。"""
+        r = ctypes.wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(self._hwnd(), ctypes.byref(r))
+        return max(r.right - r.left, int(300 * (self.win.devicePixelRatioF() or 1.0)))
 
-        class MONITORINFO(ctypes.Structure):
-            _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", _w.RECT), ("rcWork", _w.RECT),
-                        ("dwFlags", ctypes.c_ulong)]
-        mi = MONITORINFO()
-        mi.cbSize = ctypes.sizeof(MONITORINFO)
-        u32.GetMonitorInfoW(mon, ctypes.byref(mi))
-        work = mi.rcWork
-        dpr = self.win.devicePixelRatioF() or 1.0
-        w = int(360 * dpr)
-        if r + w <= work.right:
-            x = r
-        elif l - w >= work.left:
-            x = l - w
-        else:
-            x = max(work.left, r - w)
-        y = max(t, work.top)
-        h = min(b, work.bottom) - y
-        h = min(max(h, int(480 * dpr)), work.bottom - work.top)
-        y = min(y, work.bottom - h)
-        target = (x, y, w, h)
-        if target == self._dock_rect:
-            return
-        self._dock_rect = target
-        u32.SetWindowPos(self._hwnd(), 0, x, y, w, h, 0x0004 | 0x0010)  # SWP_NOZORDER | SWP_NOACTIVATE
-
-    def raise_above(self):
-        """聊天 App 刚到前台：把自己带到它上面但不抢焦点（先置顶再取消置顶，是 Windows 下不激活提到最前的老办法）。"""
-        if self.win.isMinimized() or not self.win.isVisible():
-            return
-        u32 = ctypes.windll.user32
-        flags = 0x0001 | 0x0002 | 0x0010  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
-        u32.SetWindowPos(self._hwnd(), -1, 0, 0, 0, 0, flags)  # HWND_TOPMOST
-        u32.SetWindowPos(self._hwnd(), -2, 0, 0, 0, 0, flags)  # HWND_NOTOPMOST
+    def attach(self, hwnd):
+        """当前聊天窗口换了：记下来；开着贴靠就贴过去（层级 + 位置都跟它走，见 app/dock.py）。"""
+        self._chat_hwnd = hwnd
+        if self.docked:
+            self.docker.attach(hwnd)
 
     def _paint_badge(self, title):
         """标题栏左边的小标：会话来自哪个 App。"""

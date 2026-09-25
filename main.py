@@ -28,8 +28,7 @@ chats = {}
 state = {"area": None, "busy": False, "rerun": None, "hwnd": None, "chat": "",
          "uia": {},  # uia: {会话名: (hwnd, 输入框屏幕坐标)}，QQ / WhatsApp 的会话填入走这里
          "app_chat": {},  # {App: 那个 App 当前开着的会话}，三个 App 各报各的
-         "fg_app": None, "fg_at": 0.0,  # 最近一次在前台的是哪个 App；界面只跟它
-         "fg_hwnd": None}  # 那个 App 在前台的顶层窗口，悬浮窗贴着它
+         "fg_app": None}  # 最近一次在前台的是哪个聊天 App；界面只跟它
 
 _FG_EXES = {"weixin.exe": "wechat", "wechat.exe": "wechat", "qq.exe": "qq",
             "whatsapp.root.exe": "whatsapp", "whatsapp.exe": "whatsapp"}
@@ -44,57 +43,34 @@ def app_of(title):
     return "wechat"
 
 
-def foreground_app():
-    """前台窗口是三个聊天 App 之一就返回 (App, 顶层窗口)；是别的（包括助手自己）返回 (None, None)，界面保持不动。"""
+def app_of_hwnd(hwnd):
+    """这个顶层窗口属于哪个聊天 App；不是聊天 App（包括助手自己）返回 None。"""
     import os
 
     u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
-    fg = u32.GetForegroundWindow()
     pid = ctypes.c_ulong()
-    u32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     h = k32.OpenProcess(0x1000, False, pid.value)
     if not h:
-        return None, None
+        return None
     buf, size = ctypes.create_unicode_buffer(1024), ctypes.c_uint(1024)
     ok = k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
     k32.CloseHandle(h)
-    app = _FG_EXES.get(os.path.basename(buf.value).lower()) if ok else None
-    return (app, u32.GetAncestor(fg, 2)) if app else (None, None)  # GA_ROOT：弹出的子窗口也归到主窗口
+    return _FG_EXES.get(os.path.basename(buf.value).lower()) if ok else None
 
 
-def window_rect(hwnd):
-    """窗口的物理像素矩形；最小化/不可见/已关闭返回 None。优先用 DWM 的可见边界（不含透明阴影）。"""
-    import ctypes.wintypes as w
-
-    u32 = ctypes.windll.user32
-    if not hwnd or not u32.IsWindow(hwnd) or not u32.IsWindowVisible(hwnd) or u32.IsIconic(hwnd):
-        return None
-    r = w.RECT()
-    if ctypes.windll.dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(r), ctypes.sizeof(r)) != 0:
-        u32.GetWindowRect(hwnd, ctypes.byref(r))
-    return (r.left, r.top, r.right, r.bottom)
-
-
-def follow_foreground():
-    """每 300ms 看一眼前台：切到了哪个聊天 App，界面就跟到那个 App 当前的会话。"""
-    import time
-
-    now = time.monotonic()
-    if now - state["fg_at"] < 0.3:
+def on_foreground(hwnd):
+    """系统通知前台换了窗口（app/dock.py 的钩子，Qt 主线程里回调）：是聊天 App 就让界面跟到它当前的会话，
+    悬浮窗贴过去；别的程序到前台什么都不做——悬浮窗是聊天窗口的从属窗口，会跟着主人一起被盖住。"""
+    app = app_of_hwnd(hwnd)
+    if not app:
         return
-    state["fg_at"] = now
-    app, hwnd = foreground_app()
-    if app and app != state["fg_app"]:
+    if app != state["fg_app"]:
         state["fg_app"] = app
         title = state["app_chat"].get(app)
         if title:
             ov.set_chat(title)
-    if hwnd and hwnd != state["fg_hwnd"]:  # 换到了另一个聊天窗口：贴过去并提到它上面（不抢焦点）
-        state["fg_hwnd"] = hwnd
-        ov.raise_above()
-    rect = window_rect(state["fg_hwnd"])
-    if rect:  # 聊天窗口挪了/改了大小，跟着走；关掉贴靠时 dock_to 自己什么都不做
-        ov.dock_to(rect)
+    ov.attach(hwnd)
 
 
 def generate_now(title):
@@ -331,7 +307,6 @@ def drain():
 def tick():
     try:
         drain()
-        follow_foreground()
         while not update_result.empty():
             latest, url = update_result.get()
             ov.set_update(latest, url)
@@ -375,6 +350,8 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
                  on_generate=generate_now,
                  result_of=lambda t: chats.get(t, {}).get("result"))
     child = dbg = None
+    ov.on_foreground = on_foreground
+    on_foreground(ctypes.windll.user32.GetAncestor(ctypes.windll.user32.GetForegroundWindow(), 2))
     try:
         state["hwnd"] = find_wechat_hwnd()
     except RuntimeError:
