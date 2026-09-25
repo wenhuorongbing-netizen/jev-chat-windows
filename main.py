@@ -15,7 +15,7 @@ from collections import deque
 
 from app import settings, uia_worker, update, worker
 from app.capture import find_wechat_hwnd
-from app.fill import fill, fill_at
+from app.fill import fill, fill_uia
 from app.overlay import Overlay
 from app.version import VERSION
 from core.engine import analyze, analyze_bilingual
@@ -63,6 +63,7 @@ def on_foreground(hwnd):
     """系统通知前台换了窗口（app/dock.py 的钩子，Qt 主线程里回调）：是聊天 App 就让界面跟到它当前的会话，
     悬浮窗贴过去；别的程序到前台什么都不做——悬浮窗是聊天窗口的从属窗口，会跟着主人一起被盖住。"""
     app = app_of_hwnd(hwnd)
+    ov.enable_hotkeys(bool(app))  # Alt+1/2/3 只在聊天 App 在前台时占用
     if not app:
         return
     if app != state["fg_app"]:
@@ -84,7 +85,8 @@ def generate_now(title):
         return
     start_analyze(title, msgs)
 results = queue.Queue()
-update_result = queue.Queue()  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
+update_result = queue.Queue()
+fill_errors = queue.Queue()  # 后台线程里填入失败的原因，tick 里报给界面  # 独立小队列，别跟 results 的 (kind, r, title, revision) 形状搅在一起
 
 
 def chat_of(title):
@@ -101,9 +103,16 @@ def target_of(title):
 
 
 def fill_reply(text):
-    uia = state["uia"].get(ov.current_chat())
-    if uia:  # QQ / WhatsApp：按 UI 自动化报上来的输入框位置填
-        fill_at(uia[0], uia[1], text)
+    title = ov.current_chat()
+    uia = state["uia"].get(title)
+    if uia:  # QQ / WhatsApp：UI 自动化把焦点给输入框再打字。放后台线程：面板是聊天窗口的从属窗口，
+        # 在界面线程里查它的 UI 自动化树会绕回自己的界面线程，容易卡死
+        def run():
+            try:
+                fill_uia(uia[0], app_of(title), text)
+            except Exception as e:
+                fill_errors.put(f"{type(e).__name__}: {e}")
+        threading.Thread(target=run, daemon=True).start()
         return
     if state["hwnd"] is None:  # 子进程重开过，hwnd 可能换了，用最新的
         raise RuntimeError("未找到聊天窗口，请确认已经打开")
@@ -309,6 +318,10 @@ def drain():
 def tick():
     try:
         drain()
+        while not fill_errors.empty():
+            err = fill_errors.get()
+            ov.set_status("没能填进去，可以点复制自己粘贴", "error")
+            ov.log(f"[填入失败] {err}")
         while not update_result.empty():
             latest, url = update_result.get()
             ov.set_update(latest, url)

@@ -186,10 +186,20 @@ class _TitleBar(QWidget):
 
 
 class _MainWindow(QWidget):
-    """窗口大小变了就叫 Overlay 重新排布；断点没跨过时 _relayout 自己不做事，这里不用防抖。"""
+    """窗口大小变了就叫 Overlay 重新排布；断点没跨过时 _relayout 自己不做事，这里不用防抖。
+    顺带接全局热键（WM_HOTKEY 发到这个窗口）。"""
     def __init__(self, relayout):
         super().__init__()
         self._relayout = relayout
+        self.on_hotkey = None
+
+    def nativeEvent(self, event_type, message):
+        if event_type == b"windows_generic_MSG" and self.on_hotkey:
+            msg = ctypes.wintypes.MSG.from_address(int(message))
+            if msg.message == 0x0312:  # WM_HOTKEY
+                self.on_hotkey(int(msg.wParam))
+                return True, 0
+        return super().nativeEvent(event_type, message)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -197,43 +207,54 @@ class _MainWindow(QWidget):
 
 
 class _ReplyCard(_Surface):
-    """一条候选：左上角小标（推荐/2/3），正文，双语时下面一行灰色中文意思，右下角复制 + 填入。"""
+    """一条候选。点整张卡 = 填入（也可以 Alt+1/2/3）；右上角两个轻图标：复制、填入。
+    双语时正文下面一行灰色中文意思，只给自己看，填入不带它。"""
 
     def __init__(self, owner, index, recommended=False, number=1, score=None):
         super().__init__(accent=recommended)
+        self.hoverable = True
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"点一下填入聊天输入框（Alt+{number + 1}）")
         box = QVBoxLayout(self)
         self.box = box
-        box.setContentsMargins(12, 9, 12, 9)
-        box.setSpacing(4)
+        box.setContentsMargins(12, 8, 8, 10)
+        box.setSpacing(3)
+        top = QHBoxLayout()
+        top.setSpacing(2)
         label = "推荐" if recommended else f"备选 {number}"
         if score is not None:
             label += f" · {round(score * 100)}%"
-        box.addWidget(_label(label, 11, _GREEN if recommended else _MUTED, True))
+        top.addWidget(_label(label, 11, _GREEN if recommended else _MUTED, True))
+        top.addWidget(_label(f"Alt+{number + 1}", 10, "#9aa6a0"))
+        top.addStretch(1)
+        self.copyButton = _tool(FIF.COPY, "复制", lambda: owner._copy(index), self)
+        self.copyButton.setFixedSize(26, 26)
+        top.addWidget(self.copyButton)
+        self.fillButton = _tool(FIF.SEND, f"填入（Alt+{number + 1}）", lambda: owner._fill(index), self)
+        self.fillButton.setFixedSize(26, 26)
+        self.fillButton.setAccessibleName(f"填入{'推荐回复' if recommended else f'备选 {number}'}")
+        top.addWidget(self.fillButton)
+        box.addLayout(top)
         self.text = _label(owner.cands[index], 14, "#1f2a24")
-        self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.text.setAttribute(Qt.WA_TransparentForMouseEvents)  # 点字也算点卡片
         box.addWidget(self.text)
         gloss = owner.glosses[index] if index < len(owner.glosses) else ""
-        if gloss:  # 双语：外语下面一行中文意思，只给自己看，填入不带它
+        if gloss:
             self.gloss = _label(gloss, 12, _MUTED)
-            self.gloss.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.gloss.setAttribute(Qt.WA_TransparentForMouseEvents)
             box.addWidget(self.gloss)
-        bottom = QHBoxLayout()
-        bottom.setSpacing(6)
-        bottom.addStretch(1)
-        self.copyButton = _tool(FIF.COPY, "复制这条回复", lambda: owner._copy(index), self)
-        self.copyButton.setFixedSize(28, 28)
-        bottom.addWidget(self.copyButton)
-        self.fillButton = (PrimaryPushButton if recommended else PushButton)("填入", self)
-        self.fillButton.setFixedHeight(28)
-        self.fillButton.setMinimumWidth(64)
-        self.fillButton.setAccessibleName(f"填入{'推荐回复' if recommended else f'备选 {number}'}")
-        self.fillButton.clicked.connect(lambda: owner._fill(index))
-        bottom.addWidget(self.fillButton)
-        box.addLayout(bottom)
+        self.clicked.connect(lambda: owner._fill(index))
+
+    def _hoverBackgroundColor(self):
+        return QColor("#e2f1e8" if self.accent else "#f1f5f3")
+
+    def _pressedBackgroundColor(self):
+        return QColor("#d5eadd" if self.accent else "#e6ece9")
 
     def set_available(self, enabled):
         self.fillButton.setEnabled(enabled)
         self.copyButton.setEnabled(enabled)
+        self.setEnabled(enabled)
 
     def set_compact(self, compact):
         pass  # 只有一套紧凑样式了
@@ -270,6 +291,8 @@ class Overlay:
         self._shown = ""  # 界面上正在看的会话（浏览时和上面不一样）
         self.docked = settings.dock()  # 贴着当前聊天窗口；用户拖动标题栏就解除
         self._chat_hwnd = None  # 最近一个在前台的聊天窗口
+        self._hotkeys = False  # Alt+1/2/3 现在注册着没有
+        self._order = []  # 界面上从上往下每张卡对应的候选下标，热键按它找
         self.on_foreground = None  # on_foreground(根窗口)：main.py 决定这个窗口算不算聊天 App
         self.win = _MainWindow(self._relayout)
         self.win.setObjectName("assistantWindow")
@@ -356,6 +379,7 @@ class Overlay:
         from app.dock import Docker
 
         dpr = lambda: self.win.devicePixelRatioF() or 1.0  # noqa: E731
+        self.win.on_hotkey = self._on_hotkey
         self.docker = Docker(self._hwnd(), self._width_px, lambda: int(480 * dpr()),
                              on_foreground=lambda h: self.on_foreground and self.on_foreground(h))
 
@@ -538,6 +562,25 @@ class Overlay:
         r = ctypes.wintypes.RECT()
         ctypes.windll.user32.GetWindowRect(self._hwnd(), ctypes.byref(r))
         return max(r.right - r.left, int(300 * (self.win.devicePixelRatioF() or 1.0)))
+
+    def enable_hotkeys(self, on):
+        """Alt+1/2/3 填入对应候选。全局热键会把这几个组合键从别的程序手里拿走，
+        所以只在聊天 App（或助手自己）在前台时注册，切到别的程序就还回去。"""
+        if on == self._hotkeys:
+            return
+        self._hotkeys = on
+        u32 = ctypes.windll.user32
+        for i in range(3):
+            if on:
+                u32.RegisterHotKey(self._hwnd(), i + 1, 0x0001 | 0x4000, 0x31 + i)  # MOD_ALT | MOD_NOREPEAT, '1'..'3'
+            else:
+                u32.UnregisterHotKey(self._hwnd(), i + 1)
+
+    def _on_hotkey(self, hotkey_id):
+        """Alt+N → 界面上从上往下第 N 张卡（推荐是第 1 张）。"""
+        position = hotkey_id - 1
+        if 0 <= position < len(self._order):
+            self._fill(self._order[position])
 
     def attach(self, hwnd):
         """当前聊天窗口换了：记下来；开着贴靠就贴过去（层级 + 位置都跟它走，见 app/dock.py）。"""
@@ -979,7 +1022,7 @@ class Overlay:
             self.log(f"[填入失败] {type(e).__name__}: {e}")
             self.log(f"[填入失败堆栈] {' '.join(traceback.format_exc().split())[:300]}")
             return
-        self.set_status("已尝试填入，请确认内容后发送。", "success")
+        self.set_status("已填入输入框，确认后自己按发送", "success")
 
     def _copy(self, index):
         if self._busy or not self._current or index >= len(self.cands):
@@ -1223,6 +1266,7 @@ class Overlay:
         else:
             self.cands = []
             self.glosses = []
+            self._order = []
             self._clear_cards()
             self.insight.hide()
             self.referenceNote.hide()
@@ -1249,6 +1293,7 @@ class Overlay:
             scores = [None] * len(self.cands)
         # 按概率降序排，推荐位（API 给的 choice）强制第一，同分按原索引
         order = sorted(range(len(self.cands)), key=lambda i: (i != best, -(scores[i] or 0), i))
+        self._order = order
         for position, index in enumerate(order):
             card = _ReplyCard(self, index, recommended=index == best, number=position, score=scores[index])
             self.replyBox.addWidget(card)
