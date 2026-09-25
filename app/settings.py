@@ -93,6 +93,10 @@ def bilingual_lang() -> str:
     """双语模式下回复用的语言，默认德语。"""
     return str(_read("bilingual_lang") or "德语")
 
+def dock() -> bool:
+    """悬浮窗贴靠当前聊天窗口：默认开。拖动标题栏会解除，标题栏图钉可以再开。"""
+    return bool(_read("dock", True))
+
 def debug_view() -> bool:
     """调试视图：另开一个窗口实时画识别框。默认关，开了子进程才往队列里送帧。"""
     return bool(_read("debug_view", False))
@@ -165,7 +169,8 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
          draft_base_url_text: str | None = None, reply_target_on: bool | None = None,
          style_text: str | None = None, thinking_on: bool | None = None,
          check_update_on: bool | None = None, debug_view_on: bool | None = None,
-         bilingual_on: bool | None = None, bilingual_lang_text: str | None = None) -> None:
+         bilingual_on: bool | None = None, bilingual_lang_text: str | None = None,
+         dock_on: bool | None = None) -> None:
     """每个参数为空/None = 保留当前值。两把 key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
     draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
@@ -196,6 +201,7 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "check_update": flag(check_update_on, check_update),
         "debug_view": flag(debug_view_on, debug_view),
         "bilingual": flag(bilingual_on, bilingual),
+        "dock": flag(dock_on, dock),
         "bilingual_lang": keep(bilingual_lang_text, "bilingual_lang"),
     }
     with open(_CONFIG, "w", encoding="utf-8") as f:

@@ -18,9 +18,15 @@ def run(q, enabled, interval=1.0):
     current = {}  # {app: 会话名}，变了才发 "chat"
     inputs = {}  # {会话名: (hwnd, point)}，变了才发
     warned = set()
+    import multiprocessing
+
+    parent = multiprocessing.parent_process()
     while True:
+        if parent is not None and not parent.is_alive():  # 主程序没了（被杀/崩了）就跟着退，别留孤儿进程空转
+            return
         if not enabled.is_set():
-            enabled.wait()
+            enabled.wait(1.0)
+            continue
         t0 = time.perf_counter()
         try:
             wins = find_windows()

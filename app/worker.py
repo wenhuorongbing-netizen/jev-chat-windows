@@ -40,13 +40,20 @@ def run(q, hwnd, enabled, debug_on):
     title, head = "", None  # 当前会话名 / 上一帧的头部像素
     last_area = None  # 上次发给父进程的 4 元组，变了才再发一次
     warned = False  # 消息区识别失败是否已经报过，拖窗口时别每帧刷一条
+    import multiprocessing
+
+    parent = multiprocessing.parent_process()
     while True:
+        if parent is not None and not parent.is_alive():  # 主程序没了就跟着退，别留孤儿进程一直截图
+            if cap is not None:
+                cap.stop()
+            return
         if not enabled.is_set():
             if cap is not None:
                 cap.stop()
                 cap = None
                 q.put(("paused",))
-            enabled.wait()
+            enabled.wait(1.0)
             continue
         if cap is None:
             try:

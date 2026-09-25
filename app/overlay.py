@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """浅色置顶回复助手：回复建议和独立设置页。发送始终由用户确认。"""
 import os
+import re
 import sys
 import threading
 from datetime import datetime
 from math import isfinite
 from types import SimpleNamespace
+
+import ctypes
+import ctypes.wintypes as _w
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPixmap
@@ -103,6 +107,7 @@ class _FitCombo(ComboBox):
     def _elide(self, text):
         # 右侧箭头大约 28px。还没排上版时先按一个窄宽度省略，避免最小宽度被整句名字撑开。
         avail = self.width() - 36 if self.width() > 64 else 120
+        text = re.sub(r"^(QQ|WhatsApp) · ", "", text)  # 来源已经画在左边的小标里，按钮上不重复
         return self.fontMetrics().elidedText(text, Qt.ElideRight, max(24, avail))
 
 
@@ -156,6 +161,7 @@ class _TitleBar(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self._drag = None
+        self.on_drag = None
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -165,6 +171,8 @@ class _TitleBar(QWidget):
     def mouseMoveEvent(self, event):
         if self._drag is not None and event.buttons() & Qt.LeftButton:
             self.window().move(event.globalPosition().toPoint() - self._drag)
+            if self.on_drag:  # 用户自己拖了 = 不想贴着聊天窗口了
+                self.on_drag()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -184,44 +192,46 @@ class _MainWindow(QWidget):
 
 
 class _ReplyCard(_Surface):
+    """一条候选：左上角小标（推荐/2/3），正文，双语时下面一行灰色中文意思，右下角复制 + 填入。"""
+
     def __init__(self, owner, index, recommended=False, number=1, score=None):
         super().__init__(accent=recommended)
         box = QVBoxLayout(self)
         self.box = box
-        box.setSpacing(10)
-        top = QHBoxLayout()
-        label = "推荐回复" if recommended else f"备选 {number}"
+        box.setContentsMargins(12, 9, 12, 9)
+        box.setSpacing(4)
+        label = "推荐" if recommended else f"备选 {number}"
         if score is not None:
             label += f" · {round(score * 100)}%"
-        top.addWidget(_label(label, 12, _GREEN if recommended else _MUTED, True))
-        self.copyButton = _tool(FIF.COPY, "复制这条回复", lambda: owner._copy(index), self)
-        self.copyButton.setFixedSize(24, 24)
-        top.addWidget(self.copyButton)
-        box.addLayout(top)
-        self.text = _label(owner.cands[index], 15)
+        box.addWidget(_label(label, 11, _GREEN if recommended else _MUTED, True))
+        self.text = _label(owner.cands[index], 14, "#1f2a24")
         self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         box.addWidget(self.text)
         gloss = owner.glosses[index] if index < len(owner.glosses) else ""
-        if gloss:  # 双语模式：外语下面一行中文对照，只给自己看，填入不带它
+        if gloss:  # 双语：外语下面一行中文意思，只给自己看，填入不带它
             self.gloss = _label(gloss, 12, _MUTED)
             self.gloss.setTextInteractionFlags(Qt.TextSelectableByMouse)
             box.addWidget(self.gloss)
         bottom = QHBoxLayout()
+        bottom.setSpacing(6)
         bottom.addStretch(1)
+        self.copyButton = _tool(FIF.COPY, "复制这条回复", lambda: owner._copy(index), self)
+        self.copyButton.setFixedSize(28, 28)
+        bottom.addWidget(self.copyButton)
         self.fillButton = (PrimaryPushButton if recommended else PushButton)("填入", self)
+        self.fillButton.setFixedHeight(28)
+        self.fillButton.setMinimumWidth(64)
         self.fillButton.setAccessibleName(f"填入{'推荐回复' if recommended else f'备选 {number}'}")
         self.fillButton.clicked.connect(lambda: owner._fill(index))
         bottom.addWidget(self.fillButton)
         box.addLayout(bottom)
-        self.set_compact(owner._compact)
 
     def set_available(self, enabled):
         self.fillButton.setEnabled(enabled)
         self.copyButton.setEnabled(enabled)
 
     def set_compact(self, compact):
-        self.box.setContentsMargins(12, 8, 12, 8) if compact else self.box.setContentsMargins(16, 12, 16, 12)
-        self.fillButton.setMinimumWidth(80 if compact else 100)
+        pass  # 只有一套紧凑样式了
 
 
 class Overlay:
@@ -251,12 +261,15 @@ class Overlay:
         self.counts = {}  # {会话名: 消息条数}
         self.hers = {}  # {会话名: 对方最近一句}
         self.targets = {}  # {会话名: ([发言人], 当前回复对象)}
-        self._chat = ""  # 微信当前开着的会话
+        self._chat = ""  # 聊天 App 当前开着的会话
         self._shown = ""  # 界面上正在看的会话（浏览时和上面不一样）
+        self.docked = settings.dock()  # 贴着当前聊天窗口；用户拖动标题栏就解除
+        self._dock_rect = None  # 上次贴靠算出来的物理像素矩形，没变就不动窗口
         self.win = _MainWindow(self._relayout)
         self.win.setObjectName("assistantWindow")
         self.win.setWindowTitle("JevChat-Windows")
-        self.win.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        # 不再永远置顶：贴在聊天窗口旁边，聊天 App 到前台时 raise_above() 把自己一起带上来
+        self.win.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.win.setStyleSheet(
             "QWidget#assistantWindow { background: #f5f7f6; border: 1px solid #dce3de; border-radius: 14px; }"
         )
@@ -266,19 +279,25 @@ class Overlay:
         outer.setContentsMargins(1, 1, 1, 1)
         outer.setSpacing(0)
         header = _TitleBar(self.win)
+        header.on_drag = lambda: self.set_docked(False)
         title = QHBoxLayout(header)
-        title.setContentsMargins(18, 12, 10, 10)
-        title.setSpacing(8)
-        name = _label("Jev", 20, "#233c2f", True)
-        name.setFixedWidth(40)
-        name.setAttribute(Qt.WA_TransparentForMouseEvents)
-        title.addWidget(name)
-        self.subtitle = _label("JevChat-Windows", 12, _MUTED)
-        self.subtitle.setAttribute(Qt.WA_TransparentForMouseEvents)
-        title.addWidget(self.subtitle, 1)
+        title.setContentsMargins(12, 8, 6, 6)
+        title.setSpacing(4)
+        self.appBadge = _label("", 11, "#ffffff", True)  # 「微信 / QQ / WhatsApp」小标，跟着会话变
+        self.appBadge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.appBadge.setAttribute(Qt.WA_TransparentForMouseEvents)
+        title.addWidget(self.appBadge)
+        self.chatBox = _FitCombo()
+        self.chatBox.setPlaceholderText("还没识别到会话")
+        self.chatBox.setAccessibleName("当前会话")
+        self.chatBox.setToolTip("聊天窗口切到哪个会话这里就跟到哪个；也可以自己选一个，只看它的记录和建议")
+        self.chatBox.currentIndexChanged.connect(self._on_chat_selected)
+        title.addWidget(self.chatBox, 1)
+        self.pinButton = _tool(FIF.PIN, "贴靠聊天窗口（拖动标题栏会解除）", self._toggle_dock, header)
+        title.addWidget(self.pinButton)
         self.captureSwitch = SwitchButton(header)
-        self.captureSwitch.setOnText("采集中")
-        self.captureSwitch.setOffText("已暂停")
+        self.captureSwitch.setOnText("")
+        self.captureSwitch.setOffText("")
         self.captureSwitch.setToolTip("开启或暂停采集")
         self.captureSwitch.setAccessibleName("开启或暂停采集")
         self.captureSwitch.setChecked(True)
@@ -286,9 +305,10 @@ class Overlay:
         title.addWidget(self.captureSwitch)
         self.settingsButton = _tool(FIF.SETTING, "设置", self.open_settings, header)
         title.addWidget(self.settingsButton)
-        title.addWidget(_tool(FIF.REMOVE, "最小化", self.win.showMinimized, header))
         title.addWidget(_tool(FIF.CLOSE, "关闭助手", self.win.close, header))
         outer.addWidget(header)
+        self.subtitle = QLabel()  # 旧布局的副标题，紧凑模式开关还会碰它；不显示
+        self.subtitle.hide()
         self.updateBar = QWidget(self.win)
         update_row = QHBoxLayout(self.updateBar)
         update_row.setContentsMargins(18, 4, 8, 4)
@@ -312,19 +332,20 @@ class Overlay:
         self._build_home()
         self._build_settings()
         footer = QHBoxLayout()
-        footer.setContentsMargins(20, 9, 8, 8)
-        footer.addWidget(_label(f"仅填入输入框 · 发送由你确认 · v{VERSION}", 11, _MUTED), 1)
+        footer.setContentsMargins(14, 2, 4, 4)
+        footer.addWidget(_label("只填入输入框，发送由你确认", 10, _MUTED), 1)
         grip = QSizeGrip(self.win)
         grip.setFixedSize(16, 16)
         footer.addWidget(grip, 0, Qt.AlignBottom)
         outer.addLayout(footer)
         screen = self.app.primaryScreen().availableGeometry()
         self.win.setMinimumHeight(min(360, screen.height() - 32))
-        self.win.resize(min(440, screen.width() - 32), min(820, screen.height() - 48))
+        self.win.resize(min(360, screen.width() - 32), min(760, screen.height() - 48))
         self.win.move(screen.right() - self.win.width() - 20, screen.top() + 24)
         self._relayout(self.win.width(), self.win.height())  # resizeEvent 补不到构造时这一次
         self.set_status("等待新消息" if settings.has_key() else "需要配置模型",
                         "idle" if settings.has_key() else "warning")
+        self._paint_pin()
         self.win.show()
 
     def _scroll_page(self):
@@ -347,7 +368,7 @@ class Overlay:
 
     def _relayout(self, w, h):
         """宽度跨过断点才重新摆布局（省事）；高度每次都重算，反正只是设个定高。"""
-        compact = w < 400
+        compact = w < 300
         if compact != self._compact:
             self._compact = compact
             self._apply_compact(compact)
@@ -355,14 +376,10 @@ class Overlay:
 
     def _apply_compact(self, compact):
         """紧凑/常规两套间距和可见性；断点没变时不会被调用。"""
-        self.subtitle.setVisible(not compact)
-        self.captureSwitch.setOnText("" if compact else "采集中")
-        self.captureSwitch.setOffText("" if compact else "已暂停")
         for label in self._hintLabels:
             label.setVisible(not compact)
-        self.referenceNote.setVisible(bool(self.cands) and not compact)
         self._sync_model_fields()
-        margins = (12, 8, 12, 12) if compact else (20, 8, 20, 12)
+        margins = (10, 4, 10, 10) if compact else (12, 4, 12, 10)
         for layout in self._pageLayouts:
             layout.setContentsMargins(*margins)
         for card in self.cards:
@@ -370,117 +387,94 @@ class Overlay:
 
     def _build_home(self):
         self.home, body = self._scroll_page()
-        heading = QHBoxLayout()
-        heading.addWidget(_label("回复建议", 23, "#24382d", True), 1)
-        self.updated = _label("", 11, _MUTED)
-        self.updated.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        heading.addWidget(self.updated)
-        body.addLayout(heading)
-        chat_row = QHBoxLayout()
-        chat_row.setSpacing(8)
-        prefix = _label("当前会话", 12, _MUTED)
-        prefix.setFixedWidth(56)
-        chat_row.addWidget(prefix)
-        self.chatBox = _FitCombo()
-        self.chatBox.setPlaceholderText("尚未识别到会话")
-        self.chatBox.setAccessibleName("当前会话")
-        self.chatBox.setToolTip("聊天窗口切到哪个会话这里就跟到哪个；也可以自己选一个，只看它的记录和建议")
-        self.chatBox.currentIndexChanged.connect(self._on_chat_selected)
-        chat_row.addWidget(self.chatBox, 1)
+        body.setSpacing(10)
+        # 状态行：状态文字 · 跟随/浏览中 · 更新时间 · 立即生成
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        self.status = _label("", 12, _MUTED)
+        status_row.addWidget(self.status, 1)
         self.chatFollow = _label("", 11, _MUTED)
-        self.chatFollow.setFixedWidth(52)
-        self.chatFollow.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        chat_row.addWidget(self.chatFollow)
-        body.addLayout(chat_row)
+        self.chatFollow.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        status_row.addWidget(self.chatFollow)
+        self.updated = _label("", 11, _MUTED)
+        self.updated.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        status_row.addWidget(self.updated)
+        self.generateButton = _tool(FIF.SYNC, "立即生成回复（不等对方新消息）",
+                                    lambda: self.on_generate and self._shown and self.on_generate(self._shown))
+        self.generateButton.setFixedSize(28, 28)
+        status_row.addWidget(self.generateButton)
+        body.addLayout(status_row)
+        self.progress = IndeterminateProgressBar()
+        self.progress.setFixedHeight(3)
+        self.progress.hide()
+        body.addWidget(self.progress)
+
         self.targetRow = QWidget()  # 只有开了「群聊指定回复对象」且这个会话是群聊才露出来
         target_row = QHBoxLayout(self.targetRow)
         target_row.setContentsMargins(0, 0, 0, 0)
-        target_row.setSpacing(8)
-        target_prefix = _label("回复对象", 12, _MUTED)
-        target_prefix.setFixedWidth(56)
-        target_row.addWidget(target_prefix)
+        target_row.setSpacing(6)
+        target_row.addWidget(_label("回复对象", 12, _MUTED))
         self.targetBox = _FitCombo()
         self.targetBox.setAccessibleName("回复对象")
         self.targetBox.setToolTip("三条候选都按这个人来写；不选就跟着最近说话的那位")
         self.targetBox.currentIndexChanged.connect(self._on_target_selected)
         target_row.addWidget(self.targetBox, 1)
-        self.atCheck = CheckBox("填入时带 @")
+        self.atCheck = CheckBox("带 @")
         self.atCheck.setChecked(True)
         self.atCheck.setToolTip("填入时在开头加「@名字 」。只是普通文字，不会变成真正的 @")
         target_row.addWidget(self.atCheck)
         self.targetRow.hide()
         body.addWidget(self.targetRow)
-        self.status = _label("", 12, _MUTED)
-        body.addWidget(self.status)
-        self.generateButton = PushButton("立即生成回复")
-        self.generateButton.setAccessibleName("立即生成回复")
-        self.generateButton.setToolTip("不等对方发新消息，按当前会话已有的聊天记录马上给 3 条建议")
-        self.generateButton.clicked.connect(
-            lambda: self.on_generate and self._shown and self.on_generate(self._shown))
-        body.addWidget(self.generateButton)
-        self.progress = IndeterminateProgressBar()
-        self.progress.setFixedHeight(3)
-        self.progress.hide()
-        body.addWidget(self.progress)
-        self.context = QWidget()
-        context_box = QVBoxLayout(self.context)
-        context_box.setContentsMargins(0, 0, 0, 0)
-        context_box.setSpacing(5)
-        context_box.addWidget(_label("对方最近说", 11, _MUTED))
-        self.latest = _label("", 14, "#42574a")
-        self.latest.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        context_box.addWidget(self.latest)
-        self.context.hide()
-        body.addWidget(self.context)
 
+        # 对方说的：原文（灰）+ 译文（黑，双语时才有）；Jev 模式下这张卡还放判断摘要
         self.insight = _Surface()
         insight_box = QVBoxLayout(self.insight)
-        insight_box.setContentsMargins(14, 12, 14, 12)
-        insight_box.setSpacing(7)
+        insight_box.setContentsMargins(12, 9, 12, 9)
+        insight_box.setSpacing(3)
         row = QHBoxLayout()
-        self.insightTitle = _label("对话参考", 12, _MUTED)
+        self.insightTitle = _label("对方说", 11, _MUTED, True)
         row.addWidget(self.insightTitle, 1)
         self.tension = _label("", 11)
-        self.tension.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.tension.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         row.addWidget(self.tension)
         insight_box.addLayout(row)
-        self.summary = _label("", 14, "#304c3c", True)
+        self.latest = _label("", 12, _MUTED)  # 对方原文
+        self.latest.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        insight_box.addWidget(self.latest)
+        self.summary = _label("", 14, "#1f2a24", True)  # 译文 / 判断建议
+        self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         insight_box.addWidget(self.summary)
-        self.intent = _label("", 12, _MUTED)
+        self.intent = _label("", 11, _MUTED)
         insight_box.addWidget(self.intent)
-        self.insight.setToolTip("根据当前聊天片段推测，可能理解有偏差。紧张度为 0–9 的参考评分。")
         self.insight.hide()
         body.addWidget(self.insight)
+        self.context = self.insight  # 旧代码里「对方最近说」那块现在并进这张卡
 
         self.empty = _Surface()
         empty_box = QVBoxLayout(self.empty)
-        empty_box.setContentsMargins(24, 36, 24, 36)
-        empty_box.setSpacing(14)
-        symbol = _label("…", 30, _GREEN, True)
-        symbol.setAlignment(Qt.AlignCenter)
-        empty_box.addWidget(symbol)
-        self.emptyTitle = _label("等待对方的新消息", 17, "#304c3c", True)
+        empty_box.setContentsMargins(16, 18, 16, 18)
+        empty_box.setSpacing(8)
+        self.emptyTitle = _label("等待对方的新消息", 14, "#304c3c", True)
         self.emptyTitle.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(self.emptyTitle)
-        self.emptyHint = _label("保持聊天窗口打开。\n收到新消息后，回复建议会出现在这里。", 13, _MUTED)
+        self.emptyHint = _label("", 12, _MUTED)
         self.emptyHint.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(self.emptyHint)
         self.setupButton = PrimaryPushButton("前往设置")
         self.setupButton.clicked.connect(self.open_settings)
         self.setupButton.setVisible(not settings.has_key())
         empty_box.addWidget(self.setupButton, 0, Qt.AlignHCenter)
-        if not settings.has_key():
-            self.emptyTitle.setText("先设置，再开始")
-            self.emptyHint.setText("配置模型和关系背景，\n让建议更贴近你们的对话。")
         body.addWidget(self.empty)
+        self._empty_text()
+
         self.replyBox = QVBoxLayout()
-        self.replyBox.setSpacing(10)
+        self.replyBox.setSpacing(8)
         body.addLayout(self.replyBox)
-        self.referenceNote = _label("AI 建议仅供参考，按你的语气调整后再发送。", 11, _MUTED)
+        self.referenceNote = QLabel()  # 旧布局的提示条，不再显示
         self.referenceNote.hide()
-        body.addWidget(self.referenceNote)
 
         self.historyButton = PushButton(FIF.HISTORY, "聊天记录")
+        self.historyButton.setFixedHeight(30)
         self.historyButton.clicked.connect(self._toggle_history)
         self.historyButton.setAccessibleName("展开或收起聊天记录")
         body.addWidget(self.historyButton)
@@ -493,6 +487,87 @@ class Overlay:
         body.addWidget(self.feed)
         self._history_title()
         body.addStretch(1)
+
+    # ------------------------------------------------------------ 贴靠
+    def _paint_pin(self):
+        self.pinButton.setIcon(FIF.PIN if self.docked else FIF.UNPIN)
+        self.pinButton.setToolTip("已贴靠聊天窗口（点一下解除；拖动标题栏也会解除）" if self.docked
+                                  else "点一下贴靠到当前聊天窗口旁边")
+
+    def _toggle_dock(self):
+        self.set_docked(not self.docked)
+
+    def set_docked(self, on):
+        if on == self.docked:
+            return
+        self.docked = on
+        self._dock_rect = None
+        settings.save(dock_on=on)
+        self._paint_pin()
+
+    def _hwnd(self):
+        return int(self.win.winId())
+
+    def dock_to(self, rect):
+        """rect = 聊天窗口的物理像素矩形 (l, t, r, b)。贴在它右边，放不下就左边，两边都不够就压在它右侧内沿；
+        高度跟它一样（不小于一个能看的最小值、不超出屏幕）。直接用 SetWindowPos 按物理像素摆，
+        不经过 Qt 的逻辑坐标——多显示器不同缩放时换算最容易错。"""
+        if not self.docked or self.win.isMinimized():
+            return
+        u32 = ctypes.windll.user32
+        l, t, r, b = rect
+        mon = u32.MonitorFromRect(ctypes.byref(_w.RECT(l, t, r, b)), 2)  # MONITOR_DEFAULTTONEAREST
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", _w.RECT), ("rcWork", _w.RECT),
+                        ("dwFlags", ctypes.c_ulong)]
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        u32.GetMonitorInfoW(mon, ctypes.byref(mi))
+        work = mi.rcWork
+        dpr = self.win.devicePixelRatioF() or 1.0
+        w = int(360 * dpr)
+        if r + w <= work.right:
+            x = r
+        elif l - w >= work.left:
+            x = l - w
+        else:
+            x = max(work.left, r - w)
+        y = max(t, work.top)
+        h = min(b, work.bottom) - y
+        h = min(max(h, int(480 * dpr)), work.bottom - work.top)
+        y = min(y, work.bottom - h)
+        target = (x, y, w, h)
+        if target == self._dock_rect:
+            return
+        self._dock_rect = target
+        u32.SetWindowPos(self._hwnd(), 0, x, y, w, h, 0x0004 | 0x0010)  # SWP_NOZORDER | SWP_NOACTIVATE
+
+    def raise_above(self):
+        """聊天 App 刚到前台：把自己带到它上面但不抢焦点（先置顶再取消置顶，是 Windows 下不激活提到最前的老办法）。"""
+        if self.win.isMinimized() or not self.win.isVisible():
+            return
+        u32 = ctypes.windll.user32
+        flags = 0x0001 | 0x0002 | 0x0010  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+        u32.SetWindowPos(self._hwnd(), -1, 0, 0, 0, 0, flags)  # HWND_TOPMOST
+        u32.SetWindowPos(self._hwnd(), -2, 0, 0, 0, 0, flags)  # HWND_NOTOPMOST
+
+    def _paint_badge(self, title):
+        """标题栏左边的小标：会话来自哪个 App。"""
+        if title.startswith("QQ · "):
+            text, color = "QQ", "#1677ff"
+        elif title.startswith("WhatsApp · "):
+            text, color = "WA", "#25a244"
+        elif title:
+            text, color = "微信", "#07a35a"
+        else:
+            self.appBadge.hide()
+            return
+        self.appBadge.setText(text)
+        qss = (f"BodyLabel {{ color: #ffffff; background: {color}; border-radius: 6px; "
+               f"padding: 1px 6px; }}")
+        setCustomStyleSheet(self.appBadge, qss, qss)
+        self.appBadge.show()
 
     def _build_settings(self):
         self.settingsPage, body = self._scroll_page()
@@ -978,8 +1053,8 @@ class Overlay:
         """空态卡片的默认文案，配好没配好两套说法。"""
         configured = settings.has_key()
         self.emptyTitle.setText("等待对方的新消息" if configured else "先设置，再开始")
-        self.emptyHint.setText("保持聊天窗口打开。\n收到新消息后，回复建议会出现在这里。"
-                               if configured else "配置模型和关系背景，\n让建议更贴近你们的对话。")
+        self.emptyHint.setText("对方发来新消息会自动生成；也可以点右上角 ⟳ 立即生成。"
+                               if configured else "先在设置里填好模型密钥。")
         self.setupButton.setVisible(not configured)
 
     def invalidate_replies(self):
@@ -1040,9 +1115,10 @@ class Overlay:
         self._history_title()
 
     def _show_latest(self, text):
-        self.latest.setText(text if len(text) <= 120 else text[:120] + "…")
+        self.latest.setText(text if len(text) <= 160 else text[:160] + "…")
         self.latest.setToolTip(text)
-        self.context.show()
+        if text:
+            self.insight.show()
 
     def current_chat(self):
         """界面上正在看的会话（不一定是微信当前开着的那个）。"""
@@ -1079,14 +1155,12 @@ class Overlay:
     def _switch_to(self, title):
         """换正在看的会话：记录、对方最近说、条数、上次的建议一起换过去。"""
         self._shown = title
+        self._paint_badge(title)
         self.feed.clear()
         for line in self.feeds.get(title, []):
             self.feed.appendPlainText(line)
         her = self.hers.get(title)
-        if her:
-            self._show_latest(her)
-        else:
-            self.context.hide()
+        self._show_latest(her or "")
         self._history_title()
         self._follow_text()
         self._render_targets()
@@ -1169,19 +1243,19 @@ class Overlay:
             self.replyBox.addWidget(card)
             self.cards.append(card)
         reply_to = result.get("reply_to")
-        if "translation" in result:  # 智能回复：没有 Jev 判断，这张卡放对方语言 + 中文翻译
+        if "translation" in result:  # 智能回复：没有 Jev 判断，这张卡放对方原文 + 中文翻译
             lang = result.get("lang") or "外语"
-            self.insightTitle.setText(f"对方用{lang}" + (f" · 回复给 {reply_to}" if reply_to else ""))
-            if result.get("translation"):
-                self.summary.setText(result["translation"])
-                self.intent.setText(f"候选也用{lang}写，灰字是中文意思；填入只填{lang}")
-            else:
-                self.summary.setText("中文对话，直接给中文回复")
-                self.intent.setText("")
+            self.insightTitle.setText(f"对方说 · {lang}" + (f" · 回复给 {reply_to}" if reply_to else ""))
+            self.summary.setText(result.get("translation") or "")
+            self.summary.setVisible(bool(result.get("translation")))
+            self.intent.setText("")
+            self.intent.hide()
             self.tension.setText("")
             self._finish_show()
             return
         self.insightTitle.setText(f"对话参考 · 回复给 {reply_to}" if reply_to else "对话参考")
+        self.summary.show()
+        self.intent.show()
         answers = result.get("answers") or {}
         self.summary.setText("建议：" + _choice(answers, "best_action"))
         self.intent.setText("可能意图 · " + _choice(answers, "true_intent") +
@@ -1198,9 +1272,8 @@ class Overlay:
 
     def _finish_show(self):
         self.empty.setVisible(not self.cands)
-        self.insight.setVisible(bool(self.cands))
-        self.referenceNote.setVisible(bool(self.cands) and not self._compact)
-        self.updated.setText(datetime.now().strftime("%H:%M") + " 更新")
+        self.insight.setVisible(bool(self.cands) or bool(self.latest.text()))
+        self.updated.setText(datetime.now().strftime("%H:%M"))
         if self.cands:
             self.set_status("建议已更新，选一句适合你的回复", "success")
         else:
