@@ -17,6 +17,7 @@ from app import settings, uia_worker, update, worker
 from app.capture import find_wechat_hwnd
 from app.fill import fill, fill_uia
 from app.overlay import Overlay
+from app.qol import auto_generate_allowed
 from app.version import VERSION
 from core.engine import analyze, analyze_bilingual
 
@@ -319,12 +320,13 @@ def drain():
                 chat["senders"].insert(0, name)
         ov.set_targets(title, chat["senders"], target_of(title))  # 显不显示这一行由悬浮窗按开关决定
         if new[-1][0] == "her":  # 只有对方最新说话才值得分析
-            msgs = list(chat["history"])
-            if state["busy"]:
-                state["rerun"] = (title, msgs)
-                ov.set_busy(True)
-            else:
-                start_analyze(title, msgs)
+            if auto_generate_allowed(title, settings.chat_meta):  # 静音会话：history/未读照记，不自动跑
+                msgs = list(chat["history"])
+                if state["busy"]:
+                    state["rerun"] = (title, msgs)
+                    ov.set_busy(True)
+                else:
+                    start_analyze(title, msgs)
         else:
             state["rerun"] = None
             ov.set_busy(False)

@@ -13,6 +13,20 @@ def pause_due(now, until) -> bool:
     return now >= until
 
 
+STALE_DAYS = 7  # 会话超过这么多天没动静就在下拉框里沉底置灰
+
+
+def is_stale(ts, now, days=STALE_DAYS) -> bool:
+    """ts 距今超过 days 天 = 陈旧。恰好 days 整还不算（> 才算）；没有 ts 不算。"""
+    return bool(ts) and now - ts > days * 86400
+
+
+def auto_generate_allowed(title, meta_lookup) -> bool:
+    """自动生成的闸：会话没静音才放行。meta_lookup(title) -> dict（chat_meta 条目的读取函数）。
+    只挡自动生成；history / 未读 / 手动 ↻ 都不受影响。"""
+    return not meta_lookup(title).get("muted")
+
+
 def fit_rect(rect, screens):
     """窗口矩形 (x, y, w, h) 钳到各屏 availableGeometry（同格式元组列表）的并集内。
     与某屏有交集 → 钳回相交最多的那块屏里；完全落在所有屏之外 → 主屏右缘默认位。"""

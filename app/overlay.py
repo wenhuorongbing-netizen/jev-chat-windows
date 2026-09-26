@@ -24,9 +24,10 @@ from qfluentwidgets import (
     PlainTextEdit, PrimaryPushButton, PushButton, RoundMenu, ScrollArea, SpinBox, SwitchButton,
     Theme, TransparentToolButton, setCustomStyleSheet, setFont, setTheme, setThemeColor,
 )
+from qfluentwidgets.components.widgets.combo_box import ComboBoxMenu
 
 from app import motion, settings
-from app.qol import fit_rect, fmt_remaining, pause_due
+from app.qol import STALE_DAYS, fit_rect, fmt_remaining, is_stale, pause_due
 from app.reply_rules import shown_gloss, shown_translation
 from app.theme import (ACCENT, ACCENT_HOVER, ACCENT_PRESS, ACCENT_SOFT, AUX, BODY, CANVAS,
                        CARD_GAP, CARD_PAD_X, CARD_PAD_Y, DANGER, DANGER_SOFT, FAINT, HAIRLINE,
@@ -89,14 +90,49 @@ class _MpBanner(QLabel):
             self.setFixedHeight(h)
 
 
+class _ChatComboMenu(ComboBoxMenu):
+    """会话下拉菜单：每次弹出重建（基类行为），建 action 时按行号问一次颜色（陈旧会话置灰）。
+    color_of(row) -> QColor | None；None 用默认色。"""
+
+    def __init__(self, parent, color_of):
+        super().__init__(parent)
+        self._color_of = color_of
+
+    def addAction(self, action):
+        super().addAction(action)
+        if self._color_of is None:
+            return
+        color = self._color_of(self.view.count() - 1)
+        if color is not None:
+            self.view.item(self.view.count() - 1).setForeground(color)  # 委托走 QStyledItemDelegate，认 ForegroundRole
+
+
 class _FitCombo(ComboBox):
     """长名字不撑开窄布局。按钮上按当前宽度省略；条目仍是全文，findText 靠它。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._full = ""
+        self._color_of = None  # (row) -> QColor | None，Overlay 设置；None = 不着色
+        self.on_context_menu = None  # 会话框才设：右键「把这个会话移出列表」
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def _createComboMenu(self):
+        return _ChatComboMenu(self, self._color_of)
+
+    def _build_context_menu(self):
+        menu = RoundMenu(parent=self)
+        action = Action("把这个会话移出列表", self)
+        action.triggered.connect(lambda: self.on_context_menu and self.on_context_menu())
+        menu.addAction(action)
+        return menu
+
+    def contextMenuEvent(self, event):
+        if self.on_context_menu:
+            self._build_context_menu().exec(event.globalPos())
+        else:
+            super().contextMenuEvent(event)
 
     def setText(self, text):
         self._full = text or ""
@@ -451,6 +487,9 @@ class Overlay:
         self.counts = {}  # {会话名: 消息条数}
         self.hers = {}  # {会话名: 对方最近一句}
         self.targets = {}  # {会话名: ([发言人], 当前回复对象)}
+        self._chatTs = {}  # {会话名: 最后活跃 epoch 秒}：内存即写，盘延后（_tsTimer 防抖 5s）
+        self._tsDirty = set()  # 待落盘的会话名
+        self.unread = {}  # {会话名: 未读条数}：没正在看的会话来消息才 +1，切过去清零，封顶 99
         self._chat = ""  # 聊天 App 当前开着的会话
         self._shown = ""  # 界面上正在看的会话（浏览时和上面不一样）
         self.docked = settings.dock()  # 贴着当前聊天窗口；用户拖动标题栏就解除
@@ -473,6 +512,10 @@ class Overlay:
         self._geomTimer.setSingleShot(True)
         self._geomTimer.setInterval(500)  # 位置/宽度落盘防抖
         self._geomTimer.timeout.connect(self._save_geometry)
+        self._tsTimer = QTimer(self.win)
+        self._tsTimer.setSingleShot(True)
+        self._tsTimer.setInterval(5000)  # ts 落盘防抖 5s：内存即写、盘延后
+        self._tsTimer.timeout.connect(self._flush_chat_ts)
         self.win.on_geometry = self._geometry_changed
         self.win.on_escape = self._hide_panel
         self.win.setStyleSheet(
@@ -499,6 +542,8 @@ class Overlay:
         self.chatBox.setAccessibleName("当前会话")
         self.chatBox.setToolTip("聊天窗口切到哪个会话这里就跟到哪个；也可以自己选一个，只看它的记录和建议")
         self.chatBox.currentIndexChanged.connect(self._on_chat_selected)
+        self.chatBox._color_of = self._chat_item_color  # 弹出菜单时按行着色：陈旧会话置灰
+        self.chatBox.on_context_menu = self._remove_current_chat  # 右键：把这个会话移出列表
         title.addWidget(self.chatBox, 1)
         # 「关系」收进标题栏胶囊：平时只占一个小胶囊的位置，点开才看到 7 个选项
         self.relPill = DropDownPushButton("自动", header)
@@ -526,6 +571,10 @@ class Overlay:
         self._relActions[0].setChecked(True)
         self.relPill.setMenu(self._relMenu)
         title.addWidget(self.relPill)
+        # 静音按钮只表示「当前正在看的会话」：静音 = 只记录，不自动生成（手动 ↻ 不受限）
+        self.muteButton = _tool(FIF.RINGER, "静音这个会话：只记录，不自动生成", self._toggle_mute, header)
+        self.muteButton.setAccessibleName("静音这个会话")
+        title.addWidget(self.muteButton)
         self.pinButton = _tool(FIF.PIN, "贴靠聊天窗口（拖动标题栏会解除）", self._toggle_dock, header)
         title.addWidget(self.pinButton)
         self.captureSwitch = _Switch(header)
@@ -1545,7 +1594,9 @@ class Overlay:
         if who == "her":
             self.hers[chat] = text
         self._add_chat(chat)
+        self._touch_chat(chat)  # 每条消息都算活跃：排最前、落盘防抖、陈旧色刷新
         if chat != self._shown:
+            self._bump_unread(chat)  # 没正在看的会话来消息才计未读；面板隐藏不影响（shown 没变）
             return
         self.log(lines[-1])
         if who == "her":
@@ -1569,24 +1620,80 @@ class Overlay:
         browsing = self._shown != self._chat  # 正看着的就是它、但之前是「浏览中」：也得重画，把填入放开
         self._chat = title
         self._add_chat(title)
+        self._touch_chat(title)  # 前台切到它 = 活跃：排最前、落盘防抖
         if title != self._shown or browsing:
             self.chatBox.blockSignals(True)
-            self.chatBox.setCurrentIndex(self.chatBox.findText(title))
+            self.chatBox.setCurrentIndex(self.chatBox.findData(title))
             self.chatBox.blockSignals(False)
             self._switch_to(title)
         self._follow_text()
 
     def _add_chat(self, title):
-        """新会话自动进下拉框；addItem 添第一条时会自己选中，别让它触发切换。"""
-        if not title or self.chatBox.findText(title) >= 0:
+        """新会话进下拉框：按最后活跃倒序插到该在的位置（有 ts 的按 ts 倒序，没 ts 的排最后按加入序）。
+        item 文本是纯标题，标题原文同时存 userData——查找一律走 findData/itemData，5B 装饰文本才不污染 key。
+        第一条会自己选中（基类行为），屏蔽信号别当成用户挑的；插入在当前项前面时基类会自动跟着调序号。"""
+        if not title or self.chatBox.findData(title) >= 0:
             return
+        ts = self._ts_of(title)
+        index = self.chatBox.count()
+        if ts:
+            for i in range(self.chatBox.count()):
+                other = self._ts_of(self.chatBox.itemData(i))
+                if not other or other < ts:  # 没 ts 的、或更旧的，排在它后面
+                    index = i
+                    break
         self.chatBox.blockSignals(True)
-        self.chatBox.addItem(title)
+        self.chatBox.insertItem(index, title, userData=title)
+        if self.chatBox.count() == 1:
+            self.chatBox.setCurrentIndex(0)  # addItem 有这行为，insertItem 补上，口径一致
         self.chatBox.blockSignals(False)
 
+    def move_to_top(self, title):
+        """活跃会话排到最前：removeItem + insertItem(0)（userData 带上），全程 blockSignals。
+        removeItem 换当前项是按序号不按身份的，先记下正在看的，插回去再恢复——选中态不丢。"""
+        index = self.chatBox.findData(title)
+        if index <= 0:
+            return  # 不在列表里（_add_chat 已排好）或已经在最前
+        self.chatBox.blockSignals(True)
+        current = self.chatBox.itemData(self.chatBox.currentIndex())
+        self.chatBox.removeItem(index)
+        self.chatBox.insertItem(0, title, userData=title)
+        if current is not None:
+            self.chatBox.setCurrentIndex(self.chatBox.findData(current))
+        self.chatBox.blockSignals(False)
+
+    def _ts_of(self, title):
+        """会话的最后活跃时刻：内存为准，没缓存才读一次 chat_meta（settings 每次都读盘，别反复读）。"""
+        ts = self._chatTs.get(title)
+        if ts is None:
+            ts = settings.chat_meta(title).get("ts") or 0
+            self._chatTs[title] = ts
+        return ts
+
+    def _touch_chat(self, title):
+        """活跃时刻更新点（log_message / set_chat 都到这儿）：内存即写、盘延后、排最前、刷新颜色。"""
+        if not title:
+            return
+        self._chatTs[title] = time.time()
+        self._tsDirty.add(title)
+        self._tsTimer.start()
+        self.move_to_top(title)
+
+    def _flush_chat_ts(self):
+        """防抖到点：把脏的 ts 落盘（每个会话一条 chat_meta 记录）。"""
+        dirty, self._tsDirty = self._tsDirty, set()
+        for title in dirty:
+            settings.set_chat_meta(title, ts=self._chatTs[title])
+
+    def _chat_item_color(self, row):
+        """弹出菜单按行着色：超过 STALE_DAYS 没动静的置灰 FAINT，否则 INK。"""
+        title = self.chatBox.itemData(row)
+        ts = self._ts_of(title) if title else 0
+        return QColor(FAINT) if ts and is_stale(ts, time.time(), STALE_DAYS) else QColor(INK)
+
     def _on_chat_selected(self, index):
-        """用户自己挑了一个会话：只换看的内容，微信那边不动。"""
-        title = self.chatBox.itemText(index)
+        """用户自己挑了一个会话：只换看的内容，微信那边不动。标题取 userData，装饰文本不参与。"""
+        title = self.chatBox.itemData(index)
         if title and title != self._shown:
             self._switch_to(title)
 
@@ -1595,6 +1702,9 @@ class Overlay:
         self._shown = title
         self._paint_badge(title)
         self._load_rel(title)
+        self._paint_mute()  # 静音按钮只表示当前正在看的会话
+        self.unread.pop(title, None)  # 看到了，未读清零
+        self._paint_chat_item_text(title)
         self.feed.clear()
         for line in self.feeds.get(title, []):
             self.feed.appendPlainText(line)
@@ -1604,6 +1714,9 @@ class Overlay:
         self._follow_text()
         self._render_targets()
         self.show_cached(self.result_of(title) if self.result_of else None)
+        if (settings.chat_meta(title).get("muted") and self._shown == self._chat):
+            # 浏览别人的会话时，「只看不填」的提示更要紧，静音提示让位
+            self.set_status("这个会话已静音，只记录不自动生成", "warning")
 
     def _load_rel(self, title):
         """把这个会话单独设的关系刷到标题栏胶囊上（文字 + 菜单勾选态）。"""
@@ -1661,6 +1774,82 @@ class Overlay:
     def _follow_text(self):
         """「浏览中」才显示这小字，跟随时这一格直接藏起来（去噪）。"""
         self.chatFollow.setVisible(bool(self._chat) and self._shown != self._chat)
+
+    def _toggle_mute(self):
+        """静音开关（标题栏铃铛）：只作用于当前正在看的会话，落盘 chat_meta 的 muted。"""
+        if not self._shown:
+            return
+        muted = not settings.chat_meta(self._shown).get("muted")
+        settings.set_chat_meta(self._shown, muted=muted)
+        self._paint_mute()
+        if muted:
+            self.set_status("这个会话已静音，只记录不自动生成", "warning")
+        else:
+            self.set_status("已恢复：这个会话有新消息会自动生成", "success")
+
+    def _paint_mute(self):
+        """图标态跟着 _shown 的 muted 走：静音 = 带斜杠（MUTE），未静音 = 铃铛（RINGER）。"""
+        muted = bool(self._shown) and settings.chat_meta(self._shown).get("muted")
+        self.muteButton.setIcon(FIF.MUTE if muted else FIF.RINGER)
+        self.muteButton.setToolTip("这个会话已静音：只记录，不自动生成；点一下恢复" if muted
+                                   else "静音这个会话：只记录，不自动生成")
+        self.muteButton.setAccessibleName("取消这个会话的静音" if muted else "静音这个会话")
+
+    def _bump_unread(self, title):
+        """没正在看的会话来消息：未读 +1（封顶 99），徽标写上 DisplayRole。"""
+        self.unread[title] = min(99, self.unread.get(title, 0) + 1)
+        self._paint_chat_item_text(title)
+
+    def _paint_chat_item_text(self, title):
+        """DisplayRole = 标题 或 标题 · n（n>0 时）；userData 永远纯标题，查找不受影响。"""
+        index = self.chatBox.findData(title)
+        if index < 0:
+            return
+        n = self.unread.get(title, 0)
+        self.chatBox.setItemText(index, f"{title} · {n}" if n else title)
+        if index == self.chatBox.currentIndex():
+            self.chatBox.setText(self.chatBox.itemText(index))  # 按钮上正显示它，跟着刷新（走省略逻辑）
+
+    def _remove_current_chat(self):
+        """把正在看的会话移出列表（chatBox 右键）：清内存存档与持久化（chat_meta / chat_rel）。
+        不弹确认框（误删代价低：新消息来了会重建条目，视为新会话）。main.py 的 chats 缓存不动。"""
+        title = self._shown
+        if not title or self.chatBox.findData(title) < 0:
+            return
+        self.chatBox.blockSignals(True)
+        self.chatBox.removeItem(self.chatBox.findData(title))
+        self.chatBox.blockSignals(False)
+        for store in (self.feeds, self.counts, self.hers, self.targets, self.unread, self._chatTs):
+            store.pop(title, None)
+        self._tsDirty.discard(title)
+        settings.del_chat_meta(title)
+        settings.del_chat_relationship(title)
+        self.set_status("已移出，收到新消息会重新出现", "success")
+        if self.chatBox.count() > 0:
+            # removeItem 换当前项按序号不按身份：直接显式切到第一项
+            first = self.chatBox.itemData(0)
+            self.chatBox.blockSignals(True)
+            self.chatBox.setCurrentIndex(0)
+            self.chatBox.blockSignals(False)
+            self._switch_to(first)
+            return
+        if self._chat == title:
+            self._chat = ""  # 列表已空，前台口径等下一次 set_chat 再建
+        self._shown = ""
+        self._paint_badge("")
+        self.feed.clear()
+        self._show_latest("")
+        self.cands = []
+        self.glosses = []
+        self._order = []
+        self._clear_cards()
+        self.insight.hide()
+        self.analysis.hide()
+        self.empty.show()
+        self._empty_text()
+        self._history_title()
+        self._follow_text()
+        self._render_targets()
 
     def show_cached(self, result):
         """把某个会话上次的结果放回界面；没有就回到空态。浏览别的会话时只给看不给填——

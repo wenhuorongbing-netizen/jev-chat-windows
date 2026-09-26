@@ -41,6 +41,19 @@ def chat_relationship(title: str) -> str:
     rels = _read("chat_rel", {})
     return str(rels.get(title) or "") if isinstance(rels, dict) else ""
 
+def del_chat_meta(title: str) -> None:
+    """删掉某个会话的元信息条目（5B-3 移出列表）。只动这一个 key，其余设置原样。"""
+    try:
+        with open(_CONFIG, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    metas = data.get("chat_meta") if isinstance(data.get("chat_meta"), dict) else {}
+    metas.pop(title, None)
+    data["chat_meta"] = metas
+    with open(_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
 def set_chat_relationship(title: str, value: str) -> None:
     """给一个会话单独记关系；value 为空 = 删掉，回到默认。只改这一项，别的设置原样。"""
     try:
@@ -56,6 +69,20 @@ def set_chat_relationship(title: str, value: str) -> None:
     data["chat_rel"] = rels
     with open(_CONFIG, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
+
+def del_chat_relationship(title: str) -> None:
+    """删掉某个会话单独设的关系（5B-3 移出列表时一并清）。只动这一个 key。"""
+    try:
+        with open(_CONFIG, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    rels = data.get("chat_rel") if isinstance(data.get("chat_rel"), dict) else {}
+    rels.pop(title, None)
+    data["chat_rel"] = rels
+    with open(_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
 
 def relationship_for(title: str, group: bool = False) -> str:
     """喂给模型的关系描述：会话单独设的 > 默认；是「自动」就让模型自己判断，群聊给个提示。"""
@@ -149,6 +176,27 @@ def win_width():
         return w if w > 0 else None
     except (TypeError, ValueError):
         return None
+
+def chat_meta(title: str) -> dict:
+    """某个会话的元信息（ts 最后活跃 epoch 秒、muted 静音）；没存过 / 脏数据 → {}。"""
+    metas = _read("chat_meta", {})
+    entry = metas.get(title) if isinstance(metas, dict) else None
+    return dict(entry) if isinstance(entry, dict) else {}
+
+def set_chat_meta(title: str, **fields) -> None:
+    """合并写入某个会话的元信息（只动这一个 key，其余设置原样）。字段：ts、muted。"""
+    try:
+        with open(_CONFIG, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    metas = data.get("chat_meta") if isinstance(data.get("chat_meta"), dict) else {}
+    entry = metas.get(title) if isinstance(metas.get(title), dict) else {}
+    entry.update(fields)
+    metas[title] = entry
+    data["chat_meta"] = metas
+    with open(_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
 
 def save_win_state(x: int, y: int, width: int) -> None:
     """记住未贴靠时的窗口位置和宽度。只改这两项，别的设置原样。"""
@@ -268,6 +316,7 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "chat_rel": _read("chat_rel", {}),  # 每个会话单独设的关系，由 set_chat_relationship 管，这里原样留着
         "win_pos": _read("win_pos"),  # 未贴靠时的窗口位置/宽度，由 save_win_state 管，这里原样留着
         "win_width": _read("win_width"),
+        "chat_meta": _read("chat_meta", {}),  # 每个会话的 ts/静音，由 set_chat_meta 管，这里原样留着
         "bilingual": flag(bilingual_on, bilingual),
         "dock": flag(dock_on, dock),
         "read_images": flag(read_images_on, read_images),
