@@ -8,14 +8,17 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import PlainTextEdit
 
+from app.theme import (DEBUG_BG, DEBUG_GRAY, DEBUG_HEAD, DEBUG_HER, DEBUG_IMAGE,
+                       DEBUG_ME, DEBUG_NAME, DEBUG_TINY, FAINT, SUB, SURFACE)
+
 # (kind, 画框的色, 色的中文, 这类是什么)：跟设置页那条提示一个口径
-_KINDS = (("me", "#18794e", "绿", "我"), ("her", "#1f6fd0", "蓝", "对方"),
-          ("gray", "#8a8a8a", "灰", "过滤掉的灰字"), ("name", "#e08b18", "橙", "当成发言人名"),
-          ("image", "#d0342c", "红", "当成图片丢掉"), ("tiny", "#d4b106", "黄", "小字丢掉"))
+_KINDS = (("me", DEBUG_ME, "绿", "我"), ("her", DEBUG_HER, "蓝", "对方"),
+          ("gray", DEBUG_GRAY, "灰", "过滤掉的灰字"), ("name", DEBUG_NAME, "橙", "当成发言人名"),
+          ("image", DEBUG_IMAGE, "红", "当成图片丢掉"), ("tiny", DEBUG_TINY, "黄", "小字丢掉"))
 _COLOR = {k: c for k, c, _, _ in _KINDS}
 _NAME = {k: n for k, _, _, n in _KINDS}
-_AREA = "#1f6fd0"  # 消息区
-_HEAD = "#8b5cf6"  # 头部（会话名那条）
+_AREA = DEBUG_HER  # 消息区
+_HEAD = DEBUG_HEAD  # 头部（会话名那条）
 
 
 class _Canvas(QWidget):
@@ -29,9 +32,9 @@ class _Canvas(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor("#1b1f1d"))
+        p.fillRect(self.rect(), QColor(DEBUG_BG))
         if self.img is None:
-            p.setPen(QColor("#9aa6a0"))
+            p.setPen(QColor(FAINT))
             p.drawText(self.rect(), Qt.AlignCenter, "等待画面…\n开着采集，聊天窗口有动静就会有帧")
             return
         # 等比铺满 + 居中；s 是「缩小后的帧 → 控件」的倍率，k 是子进程缩了多少
@@ -44,7 +47,7 @@ class _Canvas(QWidget):
         f = lambda x, y: (ox + x * s / k, oy + y * s / k)  # 原帧坐标 → 控件坐标
         area = self.pkt.get("area")
         if not area:
-            p.setPen(QColor("#d0342c"))
+            p.setPen(QColor(DEBUG_IMAGE))
             p.drawText(QRectF(ox, oy, w, 30), Qt.AlignCenter, "认不出消息区")
             return
         x0, y0, x1, y1 = area
@@ -58,14 +61,14 @@ class _Canvas(QWidget):
         p.setFont(tag)
         fm = QFontMetricsF(tag)
         for bx0, by0, bx1, by1, kind, _text in self.pkt.get("boxes", ()):
-            color = QColor(_COLOR.get(kind, "#ffffff"))
+            color = QColor(_COLOR.get(kind, SURFACE))
             p.setPen(QPen(color, 2))
             left, top = f(x0 + bx0, y0 + by0)
             p.drawRect(QRectF(left, top, (bx1 - bx0) * s / k, (by1 - by0) * s / k))
             # 小标签贴在框左上角外侧；宽度按文字实际宽度来，别糊住旁边的框
             label = QRectF(left, top - 12, fm.horizontalAdvance(kind) + 6, 12)
             p.fillRect(label, color)
-            p.setPen(QColor("#ffffff"))
+            p.setPen(QColor(SURFACE))
             p.drawText(label, Qt.AlignCenter, kind)
 
 
@@ -92,7 +95,7 @@ class DebugWindow(QWidget):
         row.addWidget(self.info)
         outer.addLayout(row)
         self.status = QLabel("最近一帧 —— · 等待中…", self)
-        self.status.setStyleSheet("color: #68776f;")
+        self.status.setStyleSheet(f"color: {SUB};")
         outer.addWidget(self.status)
 
     def show_packet(self, pkt):
