@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
 
@@ -54,6 +55,11 @@ def _clean(x: str) -> str:
     x = x.strip(" \t[]\"'“”‘’,，")
     x = re.sub(r"^(?:me|我)\s*[:：]\s*", "", x)  # 对话样本是「me: xxx」格式，模型会照抄前缀
     return x[:-1] if x.endswith("。") else x
+
+
+def _similar(a: str, b: str) -> bool:
+    """简短相似度判重（core 不依赖 app，app/ocr.py 里那套的简版）：ratio ≥ 0.75 算同一条。"""
+    return a == b or difflib.SequenceMatcher(None, a, b).ratio() >= 0.75
 
 
 def _analysis_of(content: str) -> str:
@@ -183,7 +189,7 @@ def draft_candidates(messages: list, relationship: str, provider: str = "deepsee
                      timeout: float = 30, keep: int = 10,
                      reply_to: str | None = None, style: str = "", thinking: bool = False,
                      guidance: str | None = None, image: str | None = None,
-                     info: dict | None = None) -> list[str]:
+                     info: dict | None = None, avoid: list[str] | None = None) -> list[str]:
     """messages: [(from, text)] 或 [(from, text, name)]，from ∈ {her, me}，name = 群里的发言人；
     只看最近 keep 条。返回最多 3 条中文候选（过滤后可能是 0 条，调用方要处理）。
 
@@ -215,6 +221,8 @@ def draft_candidates(messages: list, relationship: str, provider: str = "deepsee
     if image:
         user += "\n\n对方最新发的「[图片]」就是附带的这张图，先看懂图里是什么，再结合它回复。"
     user += "\n\n按要求输出 JSON 对象：先 analysis，再恰好 3 条 replies，每条一句。"
+    if avoid:  # 仅此一处提示词改动；avoid=None/空 时与现状逐字一致
+        user += "\n\n以下几条已经出现过了，换一个角度，别重复：" + "；".join(avoid)
     key = _api_key(LLM_ENV)  # 起草只有这一把 key，换来源不用重填
     # 1.2：DeepSeek 自己推荐的闲聊档位，0.8 出来的话太板正
     # max_tokens：三句话本来 400 够，但思考过程也算进 max_tokens，开了思考模式 400 会把答案截断
@@ -322,7 +330,8 @@ def _with_image_fallback(send, image):
 def draft_bilingual(messages: list, relationship: str, provider: str = "deepseek",
                     model: str | None = None, base_url: str | None = None,
                     timeout: float = 30, keep: int = 10, reply_to: str | None = None,
-                    style: str = "", thinking: bool = False, image: str | None = None) -> dict:
+                    style: str = "", thinking: bool = False, image: str | None = None,
+                    avoid: list[str] | None = None) -> dict:
     """对方说外语时，一次调用：认出语言 L + 对方最新消息的中文翻译 + 3 条用 L 写的回复（各带中文对照）。
     不走 Jev，只要起草那把 key。返回 {"lang", "translation", "candidates", "glosses"}，候选按推荐度排好。"""
     spec = DRAFT_PROVIDERS[provider]
@@ -336,6 +345,8 @@ def draft_bilingual(messages: list, relationship: str, provider: str = "deepseek
     if image:
         user += "\n\n对方最新发的「[图片]」就是附带的这张图：translation 里用中文简单说明图里是什么，回复要结合图的内容。"
     user += "\n\n认出对方的语言，翻译对方最新的消息，并用同一种语言给出 3 条回复，按要求输出 JSON。"
+    if avoid:  # 仅此一处提示词改动；avoid=None/空 时与现状逐字一致
+        user += "\n\n以下几条已经出现过了，换一个角度，别重复：" + "；".join(avoid)
     content = _with_image_fallback(lambda img: chat(
         spec.protocol, base_url or spec.base, _api_key(LLM_ENV), model or spec.default,
         BILINGUAL_SYSTEM, [user], temperature=0.9, max_tokens=4000 if thinking else 900,

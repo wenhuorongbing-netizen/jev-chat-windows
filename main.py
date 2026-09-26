@@ -17,9 +17,9 @@ from app import settings, uia_worker, update, worker
 from app.capture import find_wechat_hwnd
 from app.fill import fill, fill_uia
 from app.overlay import Overlay
-from app.qol import auto_generate_allowed
+from app.qol import auto_generate_allowed, run_with_retry
 from app.version import VERSION
-from core.engine import analyze, analyze_bilingual
+from core.engine import analyze, analyze_bilingual, reroll_candidate
 
 # {会话名: {history, result, rev, target, senders}}：每个会话各自的上下文、上次结果和版本号，互不串味
 # history 里是 [(who, text, name)]，engine 只认 her/me，name 是群里的发言人（单聊/自己说的是 None）；
@@ -188,32 +188,80 @@ def latest_image(title, msgs):
 
 
 def analyze_bg(msgs, title, revision, reply_to=None):
-    """后台线程只跑网络调用，结果丢队列；UI 只在主线程的 tick 里动（Qt 不能跨线程碰）。"""
+    """后台线程只跑网络调用，结果丢队列；UI 只在主线程的 tick 里动（Qt 不能跨线程碰）。
+    失败自动重试一次：第一次异常后等 1.5s（后台线程的 time.sleep，不冻 UI）再试；
+    重试前 rev 变了（来了新消息/用户取消）就不试直接丢——跟 tick 的过期检查同一口径。"""
     group = len({m[2] for m in msgs if m[0] == "her" and len(m) > 2 and m[2]}) >= 2  # 两个以上发言人 = 群聊
     rel = settings.relationship_for(title, group)
-    try:
+
+    def _run():
         if settings.bilingual():
-            results.put(("ok", analyze_bilingual(msgs, rel,
-                                                 context=settings.context(),
-                                                 model=settings.draft_model() or None,
-                                                 provider=settings.draft_provider(),
-                                                 base_url=settings.draft_base_url() or None,
-                                                 reply_to=reply_to, style=settings.style(),
-                                                 thinking=settings.thinking(),
-                                                 image=latest_image(title, msgs)),
-                         title, revision))
-            return
-        results.put(("ok", analyze(msgs, rel, context=settings.context(),
-                                   model=settings.draft_model() or None,
-                                   provider=settings.draft_provider(),
-                                   base_url=settings.draft_base_url() or None,
-                                   reply_to=reply_to, style=settings.style(),
-                                   thinking=settings.thinking(),
-                                   jev_provider=settings.jev_provider(),
-                                   jev_model=settings.jev_model() or None),
-                     title, revision))
+            return analyze_bilingual(msgs, rel,
+                                     context=settings.context(),
+                                     model=settings.draft_model() or None,
+                                     provider=settings.draft_provider(),
+                                     base_url=settings.draft_base_url() or None,
+                                     reply_to=reply_to, style=settings.style(),
+                                     thinking=settings.thinking(),
+                                     image=latest_image(title, msgs))
+        return analyze(msgs, rel, context=settings.context(),
+                       model=settings.draft_model() or None,
+                       provider=settings.draft_provider(),
+                       base_url=settings.draft_base_url() or None,
+                       reply_to=reply_to, style=settings.style(),
+                       thinking=settings.thinking(),
+                       jev_provider=settings.jev_provider(),
+                       jev_model=settings.jev_model() or None)
+
+    ok, value, _attempts = run_with_retry(_run, lambda: revision == chat_of(title)["rev"], 1.5)
+    if not ok:
+        results.put(("err", f"分析失败: {value}", title, revision))
+        return
+    results.put(("ok", value, title, revision))
+
+
+def cancel_generate():
+    """取消这次生成：界面立即脱身，结果必然作废——在跑的网络线程不杀，
+    rev +1 后结果回来被 tick() 里现成的 revision 检查自然丢弃。取消后立刻点 ↻ 可重新生成（rev 已对齐）。"""
+    title = ov.current_chat()
+    chat_of(title)["rev"] += 1
+    state["rerun"] = None
+    state["busy"] = False
+    ov.set_busy(False)
+    ov.set_status("已取消，点 ↻ 重新生成", "success")
+
+
+def reroll_reply(index):
+    """单卡重 roll「换一条」：守卫（忙 / 无 result / 下标越界）→ 取现有 result 的 lang 和候选，
+    后台线程跑 engine.reroll_candidate，结果进 results 队列（kind="reroll"）。"""
+    title = ov.current_chat()
+    chat = chat_of(title)
+    result = chat.get("result")
+    if state["busy"] or result is None or not (0 <= index < len(result.get("candidates") or [])):
+        return
+    rev = chat["rev"]
+    ov.set_card_pending(index, True)
+    threading.Thread(target=_reroll_bg, args=(title, index, list(chat["history"]), result, rev),
+                     daemon=True).start()
+
+
+def _reroll_bg(title, index, msgs, result, rev):
+    """后台线程跑网络；UI 只在 tick 里动。关系/图片口径跟正常生成一样（relationship_for / latest_image）。"""
+    group = len({m[2] for m in msgs if m[0] == "her" and len(m) > 2 and m[2]}) >= 2
+    try:
+        text, gloss = reroll_candidate(msgs, settings.relationship_for(title, group),
+                                       result.get("lang") or "中文",
+                                       list(result.get("candidates") or []),
+                                       context=settings.context(),
+                                       model=settings.draft_model() or None,
+                                       provider=settings.draft_provider(),
+                                       base_url=settings.draft_base_url() or None,
+                                       reply_to=result.get("reply_to"), style=settings.style(),
+                                       thinking=settings.thinking(),
+                                       image=latest_image(title, msgs))
+        results.put(("reroll", (index, text, gloss, ""), title, rev))
     except Exception as e:
-        results.put(("err", f"分析失败: {e}", title, revision))
+        results.put(("reroll", (index, "", "", str(e)[:120]), title, rev))
 
 
 def check_update_bg():
@@ -345,6 +393,27 @@ def tick():
             ov.set_update(latest, url)
         while not results.empty():
             kind, r, title, revision = results.get()
+            if kind == "reroll":  # 单卡重 roll：不碰 state["busy"]（主生成可能在跑）
+                index, text, gloss, err = r
+                if revision != chat_of(title)["rev"]:  # 期间来了新消息/被取消：丢弃；pending 由重建自然复位
+                    continue
+                ov.set_card_pending(index, False)
+                if err:
+                    ov.toast.show_text("换一条没成功，原样保留")
+                    continue
+                result = chat_of(title).get("result")
+                cands = (result or {}).get("candidates") or []
+                if not (0 <= index < len(cands)):
+                    continue
+                cands[index] = text  # 缓存同步：切走再切回来还是换过的
+                glosses = result.setdefault("glosses", [])
+                while len(glosses) < len(cands):
+                    glosses.append("")
+                glosses[index] = gloss
+                if title == ov.current_chat():
+                    ov.replace_card(index, text, gloss)
+                ov.toast.show_text("已换一条")
+                continue
             state["busy"] = False
             if state["rerun"]:  # 分析期间又来了新消息，接着跑最新的
                 (t, msgs), state["rerun"] = state["rerun"], None
@@ -380,7 +449,7 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     uia_child.start()
     ov = Overlay(on_fill=fill_reply, on_toggle_capture=on_toggle_capture,
                  on_target_change=on_target_change, on_toggle_debug=set_debug,
-                 on_generate=generate_now,
+                 on_generate=generate_now, on_cancel=cancel_generate, on_reroll=reroll_reply,
                  result_of=lambda t: chats.get(t, {}).get("result"))
     child = dbg = None
     ov.on_foreground = on_foreground

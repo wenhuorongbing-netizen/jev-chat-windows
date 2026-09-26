@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 try:
-    from .draft import draft_bilingual, draft_candidates, her_latest, is_chinese
+    from .draft import _similar, draft_bilingual, draft_candidates, her_latest, is_chinese
     from .jev_client import JevError, ask
     from .questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
 except ImportError:
-    from draft import draft_bilingual, draft_candidates, her_latest, is_chinese
+    from draft import _similar, draft_bilingual, draft_candidates, her_latest, is_chinese
     from jev_client import JevError, ask
     from questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
 
@@ -133,6 +133,33 @@ def analyze_bilingual(messages: list, relationship: str, model: str | None = Non
             "scores": [], "answers": {}, "usage": {}, "reply_to": reply_to,
             "lang": r["lang"] or "外语", "translation": r["translation"], "glosses": r["glosses"],
             "analysis": r.get("analysis", "")}
+
+
+def reroll_candidate(messages, relationship, lang, existing, model=None, timeout=30,
+                     context=10, provider="deepseek", base_url=None, reply_to=None,
+                     style="", thinking=False, image=None) -> tuple[str, str]:
+    """重 roll 一条候选（6B「换一条」）：走与产生这批候选相同的起草路径
+    （lang=="中文" → draft_candidates，否则 → draft_bilingual），existing 传给起草层避免重复。
+    返回 (正文, 中文对照)：挑第一条与 existing 任何一条都不重复的（draft._similar，ratio ≥ 0.75）；
+    外语路径 gloss 与正文同索引取走；都不新鲜就取第一条兜底（仍返回）。_sanitize 照旧生效。"""
+    if lang == "中文":
+        cands = draft_candidates(messages, relationship, provider=provider, model=model,
+                                 base_url=base_url, timeout=timeout, keep=context,
+                                 reply_to=reply_to, style=style, thinking=thinking,
+                                 avoid=list(existing))
+        if not cands:
+            raise JevError("重 roll 起草结果没有可用候选回复")
+        for cand in cands:
+            if not any(_similar(cand, old) for old in existing):
+                return cand, ""
+        return cands[0], ""
+    r = draft_bilingual(messages, relationship, provider=provider, model=model, image=image,
+                        base_url=base_url, timeout=timeout, keep=context, reply_to=reply_to,
+                        style=style, thinking=thinking, avoid=list(existing))
+    for cand, gloss in zip(r["candidates"], r["glosses"]):
+        if not any(_similar(cand, old) for old in existing):
+            return cand, gloss
+    return r["candidates"][0], r["glosses"][0] if r["glosses"] else ""
 
 
 if __name__ == "__main__":

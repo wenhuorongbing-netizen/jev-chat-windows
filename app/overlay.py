@@ -40,6 +40,8 @@ from core.questions import CHOICE_LABELS
 _LOG_LINES = 300
 # 全局热键 id → VK：1..3 = Alt+数字填卡（老规矩），4 = Alt+J 显隐面板，5 = Alt+G 立即生成
 _HOTKEY_VK = ((1, 0x31), (2, 0x32), (3, 0x33), (4, 0x4A), (5, 0x47))
+_GENERATE_TIP = "立即生成回复（不等对方新消息）"  # ↻ 闲态
+_CANCEL_TIP = "取消这次生成"  # ✕ 忙态
 _RELATIONSHIPS = [
     ("自动判断", "auto"), ("恋人", "romantic partners"), ("朋友", "friends"), ("同事", "colleagues"),
     ("家人", "family"), ("自定义", None),
@@ -373,8 +375,20 @@ class _ReplyCard(_Surface):
         self.altHint.hide()
         super().leaveEvent(event)
 
+    def _build_menu(self):
+        """右键菜单：复制本条、换一条（重 roll；忙 / 非 current 时禁用）。"""
+        menu = RoundMenu(parent=self)
+        copy_action = Action("复制本条", self)
+        copy_action.triggered.connect(lambda: self._owner._copy(self._index))
+        menu.addAction(copy_action)
+        reroll_action = Action("换一条", self)
+        reroll_action.setEnabled(self._owner._current and not self._owner._busy)
+        reroll_action.triggered.connect(lambda: self._owner._reroll(self._index))
+        menu.addAction(reroll_action)
+        return menu
+
     def contextMenuEvent(self, event):
-        self._owner._copy(self._index)  # 右键 = 复制本条
+        self._build_menu().exec(event.globalPos())  # 右键 = 菜单（复制 / 换一条）
 
     def set_available(self, enabled):
         self.setEnabled(enabled)  # 禁用态 = 置灰不可点（浏览别的会话、生成中）
@@ -461,10 +475,12 @@ class _Toast(QLabel):
 
 class Overlay:
     def __init__(self, on_fill, on_toggle_capture=None, on_target_change=None, result_of=None,
-                 on_toggle_debug=None, on_generate=None):
+                 on_toggle_debug=None, on_generate=None, on_cancel=None, on_reroll=None):
         """result_of(会话名) → 那个会话上次的结果或 None；切着看别的会话时用它把旧结果放回来。
         on_target_change(会话名, 人名) → 用户在群里挑了回复对象。
-        on_toggle_debug(开不开) → 开关调试视图那个独立窗口。"""
+        on_toggle_debug(开不开) → 开关调试视图那个独立窗口。
+        on_generate(会话名) → 不等对方新消息，按现有记录马上生成；on_cancel() → 取消这次生成。
+        on_reroll(下标) → 单卡重 roll「换一条」。"""
         self.app = QApplication.instance() or QApplication([])
         setTheme(Theme.LIGHT)
         setThemeColor(ACCENT, save=False)
@@ -473,6 +489,8 @@ class Overlay:
         self.on_target_change = on_target_change
         self.on_toggle_debug = on_toggle_debug
         self.on_generate = on_generate  # on_generate(会话名)：不等对方新消息，按现有记录马上生成
+        self.on_cancel = on_cancel  # on_cancel()：取消正在跑的这次生成（忙态 ↻ 变 ✕）
+        self.on_reroll = on_reroll  # on_reroll(候选下标)：单卡重 roll「换一条」
         self.result_of = result_of
         self.cands = []
         self.glosses = []  # 双语模式：每条候选的中文对照，跟 cands 同索引（已过 shown_gloss 过滤）
@@ -694,8 +712,7 @@ class Overlay:
         self.chatFollow.hide()  # 只在「浏览中」时显示，「跟随」不显示
         status_row.addWidget(self.chatFollow)
         status_row.addStretch(1)  # 状态文字隐藏时把 ↻ 顶到最右，别悬在中间
-        self.generateButton = _tool(FIF.SYNC, "立即生成回复（不等对方新消息）",
-                                    lambda: self.on_generate and self._shown and self.on_generate(self._shown))
+        self.generateButton = _tool(FIF.SYNC, _GENERATE_TIP, self._generate_or_cancel)
         self.generateButton.setFixedSize(28, 28)
         status_row.addWidget(self.generateButton)
         body.addLayout(status_row)
@@ -1393,6 +1410,48 @@ class Overlay:
         self.set_status("回复已复制，可粘贴并修改。", "success")
         self.toast.show_text("已复制，可粘贴修改")
 
+    def _reroll(self, index):
+        """「换一条」入口（卡右键菜单）：守卫与 main 同口径（忙 / 非 current / 越界），然后回调 main。"""
+        if self._busy or not self._current or index >= len(self.cands):
+            return
+        if self.on_reroll:
+            self.on_reroll(index)
+
+    def set_card_pending(self, index, pending):
+        """重 roll 中的那张卡：禁用 + 呼吸；结束 stop_pulse 并按 _current 恢复可用态。不动其它卡。"""
+        card = next((c for c in self.cards if c._index == index), None)
+        if card is None:
+            return
+        if pending:
+            card.set_available(False)
+            motion.pulse(card)
+        else:
+            motion.stop_pulse(card)
+            card.set_available(self._current and not self._busy)
+
+    def replace_card(self, index, text, gloss):
+        """换一条成功：原位重建该卡（cands/glosses 先更新），_order 与 Alt+N 映射不变，新卡淡入。
+        gloss 空则这张卡不再有灰字行；填入行为不变——只填正文（外语），gloss 只显示。"""
+        if not (0 <= index < len(self.cands)):
+            return
+        self.cands[index] = text
+        while len(self.glosses) < len(self.cands):
+            self.glosses.append("")
+        self.glosses[index] = gloss
+        position = next((i for i, c in enumerate(self.cards) if c._index == index), None)
+        if position is None:
+            return
+        old = self.cards[position]
+        motion.stop_all(old)  # 销毁前停掉呼吸/入场等所有动画
+        card = _ReplyCard(self, index, recommended=old.accent, number=position + 1)
+        self.replyBox.insertWidget(position, card)
+        self.replyBox.removeWidget(old)
+        old.hide()
+        old.deleteLater()
+        self.cards[position] = card
+        card.set_available(self._current and not self._busy)
+        motion.fade_in(card)
+
     def _capture_toggled(self, on):
         """用户自己拨的开关：界面先改，再通知父进程去开/停采集。手动操作优先：30 分钟倒计时作废。"""
         self._cancel_pause()
@@ -1458,10 +1517,22 @@ class Overlay:
         else:
             self._empty_text()
 
+    def _generate_or_cancel(self):
+        """↻ 闲态 = 立即生成（现状）；忙态变 ✕ = 取消这次生成。"""
+        if self._busy:
+            if self.on_cancel:
+                self.on_cancel()
+            return
+        if self.on_generate and self._shown:
+            self.on_generate(self._shown)
+
     def set_busy(self, busy):
         self._busy = busy
         self.progress.setVisible(busy)
         if busy:
+            self.generateButton.setIcon(FIF.CLOSE)
+            self.generateButton.setToolTip(_CANCEL_TIP)
+            self.generateButton.setAccessibleName(_CANCEL_TIP)
             self.invalidate_replies()
             self.progress.start()
             self.set_status("正在根据新消息整理回复…", "busy")
@@ -1469,6 +1540,9 @@ class Overlay:
                 self.empty.hide()  # 骨架屏顶替空态文案
                 self._show_skeletons()
         else:
+            self.generateButton.setIcon(FIF.SYNC)
+            self.generateButton.setToolTip(_GENERATE_TIP)
+            self.generateButton.setAccessibleName(_GENERATE_TIP)
             self.progress.stop()
             self._remove_skeletons()
             if not self.cands:

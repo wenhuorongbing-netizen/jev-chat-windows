@@ -97,9 +97,9 @@ def test_click_card_fills_foreign_original_only(overlay):
 
 def test_right_click_copies_candidate_to_clipboard(overlay):
     overlay.show(FOREIGN)
-    card = overlay.cards[1]
-    event = QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(5, 5), card.mapToGlobal(QPoint(5, 5)))
-    card.contextMenuEvent(event)
+    menu = overlay.cards[1]._build_menu()
+    assert menu.actions()[0].text() == "复制本条"
+    menu.actions()[0].trigger()
     assert app.clipboard().text() == FOREIGN["candidates"][1]
 
 
