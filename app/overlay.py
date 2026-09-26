@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import threading
+import time
 from datetime import datetime
 from math import isfinite
 from types import SimpleNamespace
@@ -14,8 +15,8 @@ import ctypes.wintypes
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QColor, QFont, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSizeGrip, QSizePolicy,
+    QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     Action, BodyLabel, CardWidget, CheckBox, ComboBox, DropDownPushButton, EditableComboBox,
@@ -25,6 +26,7 @@ from qfluentwidgets import (
 )
 
 from app import motion, settings
+from app.qol import fit_rect, fmt_remaining, pause_due
 from app.reply_rules import shown_gloss, shown_translation
 from app.theme import (ACCENT, ACCENT_HOVER, ACCENT_PRESS, ACCENT_SOFT, AUX, BODY, CANVAS,
                        CARD_GAP, CARD_PAD_X, CARD_PAD_Y, DANGER, DANGER_SOFT, FAINT, HAIRLINE,
@@ -35,6 +37,8 @@ from core import jev_client, llm, providers
 from core.questions import CHOICE_LABELS
 
 _LOG_LINES = 300
+# 全局热键 id → VK：1..3 = Alt+数字填卡（老规矩），4 = Alt+J 显隐面板，5 = Alt+G 立即生成
+_HOTKEY_VK = ((1, 0x31), (2, 0x32), (3, 0x33), (4, 0x4A), (5, 0x47))
 _RELATIONSHIPS = [
     ("自动判断", "auto"), ("恋人", "romantic partners"), ("朋友", "friends"), ("同事", "colleagues"),
     ("家人", "family"), ("自定义", None),
@@ -167,6 +171,50 @@ class _Surface(CardWidget):
         return self._normalBackgroundColor()
 
 
+class _Switch(SwitchButton):
+    """标题栏采集开关：左键照常开/关，右键弹「暂停 30 分钟」。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.on_pause_30 = None
+
+    def _build_menu(self):
+        menu = RoundMenu(parent=self)
+        action = Action("暂停 30 分钟", self)
+        action.triggered.connect(lambda: self.on_pause_30 and self.on_pause_30())
+        menu.addAction(action)
+        return menu
+
+    def contextMenuEvent(self, event):
+        self._build_menu().exec(event.globalPos())
+
+
+class _Feed(PlainTextEdit):
+    """聊天记录框的右键菜单：复制所选 / 全部复制 / 清空显示（只清界面，不动 feeds 存档）。
+    复制进剪贴板即完成，不给 toast——主动操作，不需要反馈。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.on_clear_display = None
+
+    def _build_menu(self):
+        menu = RoundMenu(parent=self)
+        copy_sel = Action("复制所选", self)
+        copy_sel.setEnabled(self.textCursor().hasSelection())
+        copy_sel.triggered.connect(self.copy)
+        menu.addAction(copy_sel)
+        copy_all = Action("全部复制", self)
+        copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.toPlainText()))
+        menu.addAction(copy_all)
+        clear = Action("清空显示", self)
+        clear.triggered.connect(lambda: self.on_clear_display and self.on_clear_display())
+        menu.addAction(clear)
+        return menu
+
+    def contextMenuEvent(self, event):
+        self._build_menu().exec(event.globalPos())
+
+
 class _Fetched(QObject):
     """取模型列表的后台线程 → 主线程：哪一组（SimpleNamespace）、取回来的模型 id、失败原因（成功是空串）。
     Qt 不让跨线程碰控件，信号是跨线程唯一干净的路。"""
@@ -199,11 +247,13 @@ class _TitleBar(QWidget):
 
 class _MainWindow(QWidget):
     """窗口大小变了就叫 Overlay 重新排布；断点没跨过时 _relayout 自己不做事，这里不用防抖。
-    顺带接全局热键（WM_HOTKEY 发到这个窗口）。"""
+    顺带接全局热键（WM_HOTKEY 发到这个窗口）、move/resize 落盘回调和 Esc 隐藏。"""
     def __init__(self, relayout):
         super().__init__()
         self._relayout = relayout
         self.on_hotkey = None
+        self.on_geometry = None  # move/resize 之后调（500ms 防抖在 Overlay 那边）
+        self.on_escape = None  # Esc：子控件不处理就轮到窗口，隐藏面板
 
     def nativeEvent(self, event_type, message):
         if event_type == b"windows_generic_MSG" and self.on_hotkey:
@@ -213,9 +263,23 @@ class _MainWindow(QWidget):
                 return True, 0
         return super().nativeEvent(event_type, message)
 
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if self.on_geometry:
+            self.on_geometry()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._relayout(event.size().width(), event.size().height())
+        if self.on_geometry:
+            self.on_geometry()
+
+    def keyPressEvent(self, event):
+        # 输入框（设置页 LineEdit 等）优先处理 Esc；没人要才隐藏面板
+        if event.key() == Qt.Key_Escape and self.on_escape:
+            self.on_escape()
+        else:
+            super().keyPressEvent(event)
 
 
 class _ReplyCard(_Surface):
@@ -399,6 +463,18 @@ class Overlay:
         self.win.setWindowTitle("JevChat-Windows")
         # 不再永远置顶：贴在聊天窗口旁边，聊天 App 到前台时 raise_above() 把自己一起带上来
         self.win.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.win.setAttribute(Qt.WA_ShowWithoutActivating, True)  # 任何 show 都不抢焦点（托盘/Alt+J 也是）
+        self._clock = time.time  # 暂停倒计时的时间源（测试注入假时钟）
+        self._pauseUntil = None  # 暂停 30 分钟的恢复时刻；None = 没在暂停
+        self._pauseTimer = QTimer(self.win)
+        self._pauseTimer.setInterval(60_000)  # 倒计时每分钟刷一次，不秒刷
+        self._pauseTimer.timeout.connect(self._pause_tick)
+        self._geomTimer = QTimer(self.win)
+        self._geomTimer.setSingleShot(True)
+        self._geomTimer.setInterval(500)  # 位置/宽度落盘防抖
+        self._geomTimer.timeout.connect(self._save_geometry)
+        self.win.on_geometry = self._geometry_changed
+        self.win.on_escape = self._hide_panel
         self.win.setStyleSheet(
             f"QWidget#assistantWindow {{ background: {CANVAS}; border: 1px solid {HAIRLINE_STRONG}; "
             f"border-radius: {R_PANEL}px; }}"
@@ -452,13 +528,14 @@ class Overlay:
         title.addWidget(self.relPill)
         self.pinButton = _tool(FIF.PIN, "贴靠聊天窗口（拖动标题栏会解除）", self._toggle_dock, header)
         title.addWidget(self.pinButton)
-        self.captureSwitch = SwitchButton(header)
+        self.captureSwitch = _Switch(header)
         self.captureSwitch.setOnText("")
         self.captureSwitch.setOffText("")
-        self.captureSwitch.setToolTip("开启或暂停采集")
+        self.captureSwitch.setToolTip("开启或暂停采集（右键：暂停 30 分钟）")
         self.captureSwitch.setAccessibleName("开启或暂停采集")
         self.captureSwitch.setChecked(True)
         self.captureSwitch.checkedChanged.connect(self._capture_toggled)
+        self.captureSwitch.on_pause_30 = self.pause_capture_30
         title.addWidget(self.captureSwitch)
         self.settingsButton = _tool(FIF.SETTING, "设置", self.open_settings, header)
         title.addWidget(self.settingsButton)
@@ -489,6 +566,7 @@ class Overlay:
         self._build_home()
         self._build_settings()
         self.toast = _Toast(self.win)  # 成功 pill：填入/复制的底部浮层轻反馈
+        self._build_tray()  # 系统托盘：左键显隐，右键菜单；不可用就静默降级，全走标题栏
         footer = QHBoxLayout()
         footer.setContentsMargins(16, 4, 4, 4)
         footer.addWidget(_label("只填入输入框，发送由你确认", TINY, FAINT), 1)
@@ -500,6 +578,8 @@ class Overlay:
         self.win.setMinimumHeight(min(360, screen.height() - 32))
         self.win.resize(min(360, screen.width() - 32), min(760, screen.height() - 48))
         self.win.move(screen.right() - self.win.width() - 20, screen.top() + 24)
+        if not self.docked:
+            self._restore_geometry()  # 贴靠的话 dock.py 会摆，别抢
         self._relayout(self.win.width(), self.win.height())  # resizeEvent 补不到构造时这一次
         self.set_status("等待新消息" if settings.has_key() else "需要配置模型",
                         "idle" if settings.has_key() else "warning")
@@ -654,7 +734,8 @@ class Overlay:
         self.historyButton.clicked.connect(self._toggle_history)
         self.historyButton.setAccessibleName("展开或收起聊天记录")
         body.addWidget(self.historyButton)
-        self.feed = PlainTextEdit()
+        self.feed = _Feed()
+        self.feed.on_clear_display = self.feed.clear  # 「清空显示」只清界面，feeds 存档不动
         self.feed.setReadOnly(True)
         self.feed.setPlaceholderText("识别到的聊天内容会显示在这里")
         self.feed.setMaximumBlockCount(_LOG_LINES)
@@ -681,6 +762,32 @@ class Overlay:
         self.docker.set_enabled(on)
         if on and self._chat_hwnd:
             self.docker.attach(self._chat_hwnd)
+        if not on:
+            self._restore_geometry()  # 解除贴靠：回到上次未贴靠的位置（拖动中会被后续拖动立刻覆盖）
+
+    def _geometry_changed(self):
+        """moveEvent/resizeEvent 都到这儿：500ms 防抖，别每拖一个像素就写一次盘。"""
+        self._geomTimer.start()
+
+    def _save_geometry(self):
+        """只有未贴靠的位置和宽度才值得记（贴靠的位置由聊天窗口决定）。"""
+        if self.docked:
+            return
+        p = self.win.pos()
+        settings.save_win_state(p.x(), p.y(), self.win.width())
+
+    def _restore_geometry(self):
+        """未贴靠：恢复上次的位置和宽度，并钳到各屏 availableGeometry 并集内；没存过就不动。"""
+        if self.docked:
+            return
+        pos, width = settings.win_pos(), settings.win_width()
+        if width:
+            w = min(max(width, self.win.minimumWidth()), self.win.maximumWidth())
+            self.win.resize(w, self.win.height())
+        if pos:
+            screens = [tuple(s.availableGeometry().getRect()) for s in self.app.screens()]
+            x, y, w, h = fit_rect((pos[0], pos[1], self.win.width(), self.win.height()), screens)
+            self.win.setGeometry(x, y, w, h)
 
     def _hwnd(self):
         return int(self.win.winId())
@@ -692,23 +799,83 @@ class Overlay:
         return max(r.right - r.left, int(300 * (self.win.devicePixelRatioF() or 1.0)))
 
     def enable_hotkeys(self, on):
-        """Alt+1/2/3 填入对应候选。全局热键会把这几个组合键从别的程序手里拿走，
+        """Alt+1/2/3 填卡、Alt+J 显隐、Alt+G 立即生成。全局热键会把这些组合键从别的程序手里拿走，
         所以只在聊天 App（或助手自己）在前台时注册，切到别的程序就还回去。"""
         if on == self._hotkeys:
             return
         self._hotkeys = on
         u32 = ctypes.windll.user32
-        for i in range(3):
+        for hotkey_id, vk in _HOTKEY_VK:
             if on:
-                u32.RegisterHotKey(self._hwnd(), i + 1, 0x0001 | 0x4000, 0x31 + i)  # MOD_ALT | MOD_NOREPEAT, '1'..'3'
+                u32.RegisterHotKey(self._hwnd(), hotkey_id, 0x0001 | 0x4000, vk)  # MOD_ALT | MOD_NOREPEAT
             else:
-                u32.UnregisterHotKey(self._hwnd(), i + 1)
+                u32.UnregisterHotKey(self._hwnd(), hotkey_id)
 
     def _on_hotkey(self, hotkey_id):
-        """Alt+N → 界面上从上往下第 N 张卡（推荐是第 1 张）。"""
+        """1..3 → 界面上从上往下第 N 张卡（推荐是第 1 张）；4 = Alt+J 显隐；5 = Alt+G 立即生成。"""
+        if hotkey_id == 4:
+            self.toggle_panel()
+            return
+        if hotkey_id == 5:  # 跟 ↻ 按钮是同一个回调，没有新行为分支
+            if self.on_generate and self._shown:
+                self.on_generate(self._shown)
+            return
         position = hotkey_id - 1
         if 0 <= position < len(self._order):
             self._fill(self._order[position])
+
+    def toggle_panel(self):
+        """Alt+J / 托盘左键：显示 ↔ 隐藏。显示只 show + raise_，不 activateWindow——
+        全局热键只在聊天 App（或助手自己）在前台时才注册，弹出来不该把焦点从聊天窗口抢走。"""
+        if self.win.isVisible():
+            self.win.hide()
+        else:
+            self.win.show()
+            self.win.raise_()
+
+    def _hide_panel(self):
+        """Esc：只隐藏，不切换（已经藏着就什么都不做）。"""
+        self.win.hide()
+
+    def _build_tray(self):
+        """系统托盘：图标用 FIF.CHAT 生成（实现最干净）。不可用（极少数环境）静默降级，功能全走标题栏。
+        任何时候都不调 showMessage——禁止气泡通知。"""
+        self.tray = None
+        self.trayMenu = self._build_tray_menu()
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray = QSystemTrayIcon(FIF.CHAT.icon(), self.win)
+        self.tray.setToolTip("JevChat")
+        self.tray.setContextMenu(self.trayMenu)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.show()
+
+    def _build_tray_menu(self):
+        """菜单总是建（托盘不可用时只是不挂上）：显示/隐藏、采集（跟标题栏开关双向同步）、暂停 30 分钟、退出。"""
+        menu = QMenu(self.win)
+        self.trayToggleAction = menu.addAction("隐藏面板")
+        self.trayToggleAction.triggered.connect(self.toggle_panel)
+        self.trayCaptureAction = menu.addAction("采集")
+        self.trayCaptureAction.setCheckable(True)
+        self.trayCaptureAction.setChecked(self.captureSwitch.isChecked())
+        self.trayCaptureAction.toggled.connect(self.captureSwitch.setChecked)  # 托盘 → 开关
+        self.captureSwitch.checkedChanged.connect(self.trayCaptureAction.setChecked)  # 开关 → 托盘
+        pause = menu.addAction("暂停 30 分钟")
+        pause.triggered.connect(self.pause_capture_30)
+        menu.addSeparator()
+        quit_action = menu.addAction("退出")
+        quit_action.triggered.connect(self.win.close)  # 与标题栏关闭同一清理路径
+        menu.aboutToShow.connect(self._sync_tray_menu)
+        return menu
+
+    def _sync_tray_menu(self):
+        """每次弹出前对齐：显隐文案跟当前状态，采集勾选跟标题栏开关。"""
+        self.trayToggleAction.setText("隐藏面板" if self.win.isVisible() else "显示面板")
+        self.trayCaptureAction.setChecked(self.captureSwitch.isChecked())
+
+    def _tray_activated(self, reason):
+        if reason == QSystemTrayIcon.Trigger:  # 左键单击 = 显示/隐藏面板
+            self.toggle_panel()
 
     def attach(self, hwnd):
         """当前聊天窗口换了：记下来；开着贴靠就贴过去（层级 + 位置都跟它走，见 app/dock.py）。"""
@@ -1178,10 +1345,36 @@ class Overlay:
         self.toast.show_text("已复制，可粘贴修改")
 
     def _capture_toggled(self, on):
-        """用户自己拨的开关：界面先改，再通知父进程去开/停采集。"""
+        """用户自己拨的开关：界面先改，再通知父进程去开/停采集。手动操作优先：30 分钟倒计时作废。"""
+        self._cancel_pause()
         self._capture_text(on)
         if self.on_toggle_capture:
             self.on_toggle_capture(on)
+
+    def pause_capture_30(self):
+        """暂停采集 30 分钟（托盘菜单 / 开关右键）。走正常关采集路径，60s 定时器刷倒计时，
+        到点自动恢复。重启应用不记忆（状态全在内存里）。"""
+        self.captureSwitch.setChecked(False)  # 会触发 _capture_toggled，先把旧倒计时清干净
+        self._pauseUntil = self._clock() + 30 * 60
+        self._pauseTimer.start()
+        self._pause_tick()
+
+    def _pause_tick(self):
+        """到点自动恢复；没到点把剩余时间刷上状态行（warning 常驻，每分钟一次）。"""
+        if self._pauseUntil is None:
+            self._pauseTimer.stop()
+            return
+        now = self._clock()
+        if pause_due(now, self._pauseUntil):
+            self.captureSwitch.setChecked(True)  # 走正常开采集路径（_capture_toggled 会清暂停态）
+            self.set_status("已恢复采集", "success")
+            return
+        self.set_status(f"采集已暂停 · {fmt_remaining(self._pauseUntil - now)} 后恢复", "warning")
+
+    def _cancel_pause(self):
+        """手动再开/再关、或应用退出（定时器是 win 的子对象，随之销毁）时取消倒计时。"""
+        self._pauseUntil = None
+        self._pauseTimer.stop()
 
     def set_update(self, latest, url):
         """main.py 后台线程查到比当前新的版本才会调这个。只显示版本号和 Release 链接，别的什么都没有。"""

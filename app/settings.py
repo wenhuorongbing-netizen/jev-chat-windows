@@ -132,6 +132,36 @@ def dock() -> bool:
     """悬浮窗贴靠当前聊天窗口：默认开。拖动标题栏会解除，标题栏图钉可以再开。"""
     return bool(_read("dock", True))
 
+def win_pos():
+    """上次未贴靠时的窗口位置 (x, y)；没存过 / 脏数据 → None（Q5）。"""
+    v = _read("win_pos")
+    if isinstance(v, (list, tuple)) and len(v) == 2:
+        try:
+            return int(v[0]), int(v[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+def win_width():
+    """上次未贴靠时的窗口宽度；没存过 / 脏数据 → None（Q5）。"""
+    try:
+        w = int(_read("win_width"))
+        return w if w > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+def save_win_state(x: int, y: int, width: int) -> None:
+    """记住未贴靠时的窗口位置和宽度。只改这两项，别的设置原样。"""
+    try:
+        with open(_CONFIG, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    data["win_pos"] = [int(x), int(y)]
+    data["win_width"] = int(width)
+    with open(_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
 def debug_view() -> bool:
     """调试视图：另开一个窗口实时画识别框。默认关，开了子进程才往队列里送帧。"""
     return bool(_read("debug_view", False))
@@ -236,6 +266,8 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "check_update": flag(check_update_on, check_update),
         "debug_view": flag(debug_view_on, debug_view),
         "chat_rel": _read("chat_rel", {}),  # 每个会话单独设的关系，由 set_chat_relationship 管，这里原样留着
+        "win_pos": _read("win_pos"),  # 未贴靠时的窗口位置/宽度，由 save_win_state 管，这里原样留着
+        "win_width": _read("win_width"),
         "bilingual": flag(bilingual_on, bilingual),
         "dock": flag(dock_on, dock),
         "read_images": flag(read_images_on, read_images),
