@@ -82,7 +82,7 @@ class DebugWindow(QWidget):
         self.setWindowFlags(Qt.Tool)
         self.resize(900, 650)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 8)
+        outer.setContentsMargins(12, 12, 12, 8)
         outer.setSpacing(8)
         row = QHBoxLayout()
         row.setSpacing(8)

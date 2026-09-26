@@ -119,3 +119,39 @@ def test_analysis_line_below_cards_and_toggleable(overlay):
 def test_empty_analysis_stays_hidden(overlay):
     overlay.show(CHINESE)
     assert not overlay.analysis.isVisible()
+
+
+def test_busy_shows_three_skeleton_cards_with_pulse(overlay):
+    overlay.set_busy(True)
+    assert len(overlay.skeletons) == 3, "busy 且无候选时插入 3 张骨架卡"
+    for skeleton in overlay.skeletons:
+        assert skeleton.graphicsEffect() is not None, "骨架卡要有 pulse 呼吸效果"
+    assert not overlay.empty.isVisible(), "骨架屏顶替空态文案"
+    overlay.set_busy(False)
+    assert overlay.skeletons == []
+    assert overlay.empty.isVisible()
+
+
+def test_skeletons_leave_no_live_refs(overlay):
+    import weakref
+    from PySide6.QtCore import QCoreApplication, QEvent
+    overlay.set_busy(True)
+    refs = [weakref.ref(sk) for sk in overlay.skeletons]
+    overlay.set_busy(False)  # 内部停动画、清强引用、deleteLater
+    # deleteLater 的销毁走 DeferredDelete 事件，processEvents 不冲刷它，要显式送一次
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert all(ref() is None for ref in refs), "骨架销毁后不得存活控件/动画引用"
+
+
+def test_fill_success_marks_card_and_shows_pill(overlay):
+    overlay.show(FOREIGN)
+    overlay.cards[0].clicked.emit()
+    assert overlay.cards[0].num.text() == "✓", "填入成功的卡序号变 ✓"
+    assert overlay.toast.isVisible()
+    assert overlay.toast.text() == "已填入，确认后自己发送"
+
+
+def test_copy_shows_pill(overlay):
+    overlay.show(FOREIGN)
+    overlay._copy(1)
+    assert overlay.toast.text() == "已复制，可粘贴修改"

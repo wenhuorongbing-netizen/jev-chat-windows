@@ -24,11 +24,12 @@ from qfluentwidgets import (
     Theme, TransparentToolButton, setCustomStyleSheet, setFont, setTheme, setThemeColor,
 )
 
-from app import settings
+from app import motion, settings
 from app.reply_rules import shown_gloss, shown_translation
-from app.theme import (ACCENT, ACCENT_SOFT, AUX, BODY, BORDER, CANVAS, CARD_GAP, CARD_PAD_X,
-                       CARD_PAD_Y, DANGER, FAINT, INK, QQ, R_CARD, R_PANEL, R_PILL, SUB,
-                       SURFACE, TINY, TITLE, WARN, WECHAT, WHATSAPP, hover_of, pressed_of)
+from app.theme import (ACCENT, ACCENT_HOVER, ACCENT_PRESS, ACCENT_SOFT, AUX, BODY, CANVAS,
+                       CARD_GAP, CARD_PAD_X, CARD_PAD_Y, DANGER, DANGER_SOFT, FAINT, HAIRLINE,
+                       HAIRLINE_STRONG, HOVER, INK, PRESS, QQ, R_CARD, R_PANEL, SKELETON, SUB,
+                       SURFACE, TINY, TITLE, WARN, WECHAT, WHATSAPP)
 from app.version import VERSION
 from core import jev_client, llm, providers
 from core.questions import CHOICE_LABELS
@@ -133,7 +134,8 @@ def _label(text="", size=14, color=None, bold=False, parent=None):
 
 def _tool(icon, title, callback, parent=None):
     button = TransparentToolButton(icon, parent)
-    button.setFixedSize(32, 32)
+    button.setFixedSize(28, 28)  # 统一 hit area，图标视觉 16px
+    button.setIconSize(QSize(16, 16))
     button.setToolTip(title)
     button.setAccessibleName(title)
     button.clicked.connect(callback)
@@ -141,13 +143,21 @@ def _tool(icon, title, callback, parent=None):
 
 
 class _Surface(CardWidget):
-    def __init__(self, parent=None, accent=False):
+    def __init__(self, parent=None, accent=False, tone="normal"):
         self.accent = accent
+        self.tone = tone  # "normal" 白卡 / "danger" 出错卡（DANGER_SOFT 底）
         super().__init__(parent)
         self.setBorderRadius(R_CARD)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
+    def set_tone(self, tone):
+        """切换底色语义后立刻重算背景色（走 CardWidget 自己的动画管线，不用 QSS 硬盖）。"""
+        self.tone = tone
+        self._updateBackgroundColor()
+
     def _normalBackgroundColor(self):
+        if self.tone == "danger":
+            return QColor(DANGER_SOFT)
         return QColor(ACCENT_SOFT if self.accent else SURFACE)
 
     def _hoverBackgroundColor(self):
@@ -220,6 +230,7 @@ class _ReplyCard(_Surface):
         self._index = index
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("点一下填入输入框，右键复制")
+        motion.press_flash(self)  # 按压/松开的颜色过渡：90ms OutCubic，禁弹簧
         box = QVBoxLayout(self)
         self.box = box
         box.setContentsMargins(CARD_PAD_X, CARD_PAD_Y, CARD_PAD_X, CARD_PAD_Y)
@@ -246,10 +257,10 @@ class _ReplyCard(_Surface):
         self.clicked.connect(lambda: owner._fill(index))
 
     def _hoverBackgroundColor(self):
-        return hover_of(ACCENT_SOFT if self.accent else SURFACE)
+        return QColor(ACCENT_HOVER if self.accent else HOVER)
 
     def _pressedBackgroundColor(self):
-        return pressed_of(ACCENT_SOFT if self.accent else SURFACE)
+        return QColor(ACCENT_PRESS if self.accent else PRESS)
 
     def _disabledBackgroundColor(self):
         return QColor(CANVAS)  # 置灰：推荐底色也一起褪掉，一眼看出现在不能点
@@ -314,6 +325,40 @@ class _ElideLine(BodyLabel):
             self._render()  # 宽度变了重新省略
 
 
+class _Toast(QLabel):
+    """窗口底部居中的轻提示浮层：120ms 淡入 → 停留 1600ms → 200ms 淡出。
+    WA_TransparentForMouseEvents：不抢焦点、不吃鼠标；居中放置，不挡右下角 SizeGrip。"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setTextFormat(Qt.PlainText)
+        setFont(self, AUX)
+        ink = QColor(INK)
+        self.setStyleSheet(
+            f"QLabel {{ background: rgba({ink.red()}, {ink.green()}, {ink.blue()}, 230); "
+            f"color: {SURFACE}; border-radius: {R_CARD}px; padding: 8px 16px; }}")
+        self.hide()
+        self._hold = QTimer(self)
+        self._hold.setSingleShot(True)
+        self._hold.timeout.connect(self._dismiss)
+
+    def show_text(self, text, hold_ms=1600):
+        motion.stop_all(self)  # 上一次还没淡出就被再次触发：先停干净，避免叠动画
+        self._hold.stop()
+        self.setText(text)
+        self.adjustSize()
+        parent = self.parentWidget()
+        self.move((parent.width() - self.width()) // 2, parent.height() - self.height() - 44)
+        self.show()
+        self.raise_()
+        motion.fade_in(self, duration=120)
+        self._hold.start(hold_ms)
+
+    def _dismiss(self):
+        motion.fade_out(self, duration=200, on_finished=self.hide)
+
+
 class Overlay:
     def __init__(self, on_fill, on_toggle_capture=None, on_target_change=None, result_of=None,
                  on_toggle_debug=None, on_generate=None):
@@ -332,6 +377,7 @@ class Overlay:
         self.cands = []
         self.glosses = []  # 双语模式：每条候选的中文对照，跟 cands 同索引（已过 shown_gloss 过滤）
         self.cards = []
+        self.skeletons = []  # 生成中的骨架卡：一条候选都没有时顶替空态文案
         self._busy = False
         self._current = False
         self._compact = None  # 断点模式：None 保证 _relayout 第一次调用必定生效
@@ -354,7 +400,7 @@ class Overlay:
         # 不再永远置顶：贴在聊天窗口旁边，聊天 App 到前台时 raise_above() 把自己一起带上来
         self.win.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.win.setStyleSheet(
-            f"QWidget#assistantWindow {{ background: {CANVAS}; border: 1px solid {BORDER}; "
+            f"QWidget#assistantWindow {{ background: {CANVAS}; border: 1px solid {HAIRLINE_STRONG}; "
             f"border-radius: {R_PANEL}px; }}"
         )
         self.win.setMinimumWidth(320)
@@ -365,9 +411,10 @@ class Overlay:
         header = _TitleBar(self.win)
         header.on_drag = lambda: self.set_docked(False)
         title = QHBoxLayout(header)
-        title.setContentsMargins(12, 8, 6, 6)
+        title.setContentsMargins(12, 8, 8, 8)
         title.setSpacing(4)
         self.appBadge = _label("", AUX, SURFACE, True)  # 「微信 / QQ / WhatsApp」小标，跟着会话变
+        self.appBadge.setFixedHeight(20)  # 标题栏胶囊统一高度 20
         self.appBadge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.appBadge.setAttribute(Qt.WA_TransparentForMouseEvents)
         title.addWidget(self.appBadge)
@@ -381,11 +428,13 @@ class Overlay:
         self.relPill = DropDownPushButton("自动", header)
         self.relPill.setMinimumWidth(0)
         self.relPill.setMaximumWidth(64)  # 360 宽的标题栏，胶囊不能挤到别人
+        self.relPill.setFixedHeight(20)  # 与 App 徽标统一高度
         setFont(self.relPill, AUX)
         self.relPill.setToolTip("这个会话按什么关系来写回复，点一下换；会一直记着")
         self.relPill.setAccessibleName("这个会话的关系")
-        qss = (f"DropDownPushButton {{ background: {SURFACE}; border: 1px solid {BORDER}; "
-               f"border-radius: {R_PILL}px; color: {SUB}; padding: 1px 4px; }}")
+        qss = (f"DropDownPushButton {{ background: {SURFACE}; border: 1px solid {HAIRLINE}; "
+               f"border-radius: {R_CARD}px; color: {SUB}; padding: 2px 8px; }} "
+               f"DropDownPushButton:hover {{ background: {HOVER}; }}")
         setCustomStyleSheet(self.relPill, qss, qss)
         self._relMenu = RoundMenu(parent=self.relPill)
         self._relActions = []
@@ -419,7 +468,7 @@ class Overlay:
         self.subtitle.hide()
         self.updateBar = QWidget(self.win)
         update_row = QHBoxLayout(self.updateBar)
-        update_row.setContentsMargins(18, 4, 8, 4)
+        update_row.setContentsMargins(16, 4, 8, 4)
         update_row.setSpacing(8)
         self.updateLabel = _label("", AUX, ACCENT, True)
         update_row.addWidget(self.updateLabel, 1)
@@ -439,8 +488,9 @@ class Overlay:
         outer.addWidget(self.pages, 1)
         self._build_home()
         self._build_settings()
+        self.toast = _Toast(self.win)  # 成功 pill：填入/复制的底部浮层轻反馈
         footer = QHBoxLayout()
-        footer.setContentsMargins(14, 2, 4, 4)
+        footer.setContentsMargins(16, 4, 4, 4)
         footer.addWidget(_label("只填入输入框，发送由你确认", TINY, FAINT), 1)
         grip = QSizeGrip(self.win)
         grip.setFixedSize(16, 16)
@@ -473,8 +523,8 @@ class Overlay:
         content.setObjectName("pageContent")
         content.setStyleSheet("QWidget#pageContent { background: transparent; }")
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(20, 8, 20, 12)
-        layout.setSpacing(14)
+        layout.setContentsMargins(16, 8, 16, 12)
+        layout.setSpacing(12)
         scroll.setWidget(content)
         self.pages.addWidget(scroll)
         self._pageLayouts.append(layout)
@@ -492,7 +542,7 @@ class Overlay:
         for label in self._hintLabels:
             label.setVisible(not compact)
         self._sync_model_fields()
-        margins = (10, 4, 10, 10) if compact else (12, 4, 12, 10)
+        margins = (8, 4, 8, 8) if compact else (16, 8, 16, 12)
         for layout in self._pageLayouts:
             layout.setContentsMargins(*margins)
         for card in self.cards:
@@ -500,10 +550,10 @@ class Overlay:
 
     def _build_home(self):
         self.home, body = self._scroll_page()
-        body.setSpacing(10)
+        body.setSpacing(8)
         # 状态行：状态文字（只在 生成中/警告/出错 时显示，成功提示 3 秒隐去）· 浏览中 · 立即生成
         status_row = QHBoxLayout()
-        status_row.setSpacing(6)
+        status_row.setSpacing(8)
         self.status = _label("", AUX, SUB)
         self.status.hide()
         self._statusTimer = QTimer(self.win)
@@ -528,7 +578,7 @@ class Overlay:
         self.targetRow = QWidget()  # 只有开了「群聊指定回复对象」且这个会话是群聊才露出来
         target_row = QHBoxLayout(self.targetRow)
         target_row.setContentsMargins(0, 0, 0, 0)
-        target_row.setSpacing(6)
+        target_row.setSpacing(8)
         target_row.addWidget(_label("回复对象", AUX, SUB))
         self.targetBox = _FitCombo()
         self.targetBox.setAccessibleName("回复对象")
@@ -548,7 +598,7 @@ class Overlay:
         insight_box.setContentsMargins(CARD_PAD_X, CARD_PAD_Y, CARD_PAD_X, CARD_PAD_Y)
         insight_box.setSpacing(4)
         row = QHBoxLayout()
-        self.insightTitle = _label("对方说", AUX, SUB, True)
+        self.insightTitle = _label("对方说", TINY, FAINT, True)  # FAINT 小字，靠字重出层级
         row.addWidget(self.insightTitle, 1)
         self.tension = _label("", AUX)
         self.tension.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
@@ -571,7 +621,7 @@ class Overlay:
         empty_box = QVBoxLayout(self.empty)
         empty_box.setContentsMargins(16, 16, 16, 16)
         empty_box.setSpacing(8)
-        self.emptyTitle = _label("等待对方的新消息", BODY, INK, True)
+        self.emptyTitle = _label("等待对方的新消息", TINY, SUB, True)  # 居中构成：TINY 灰标题 + 一行说明 + 唯一动作
         self.emptyTitle.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(self.emptyTitle)
         self.emptyHint = _label("", AUX, SUB)
@@ -600,7 +650,7 @@ class Overlay:
         self.referenceNote.hide()
 
         self.historyButton = PushButton(FIF.HISTORY, "聊天记录")
-        self.historyButton.setFixedHeight(30)
+        self.historyButton.setFixedHeight(32)
         self.historyButton.clicked.connect(self._toggle_history)
         self.historyButton.setAccessibleName("展开或收起聊天记录")
         body.addWidget(self.historyButton)
@@ -678,8 +728,8 @@ class Overlay:
             self.appBadge.hide()
             return
         self.appBadge.setText(text)
-        qss = (f"BodyLabel {{ color: {SURFACE}; background: {color}; border-radius: {R_PILL}px; "
-               f"padding: 1px 6px; }}")
+        qss = (f"BodyLabel {{ color: {SURFACE}; background: {color}; border-radius: {R_CARD}px; "
+               f"padding: 2px 8px; }}")
         setCustomStyleSheet(self.appBadge, qss, qss)
         self.appBadge.show()
 
@@ -692,7 +742,7 @@ class Overlay:
         body.addWidget(_label("调整关系背景，配置判断和起草用的两个模型。", AUX, SUB))
         preference = _Surface()
         box = QVBoxLayout(preference)
-        box.setContentsMargins(16, 16, 16, 18)
+        box.setContentsMargins(16, 16, 16, 16)
         box.setSpacing(12)
         box.addWidget(_label("回复偏好", BODY, INK, True))
         relation_label = _label("默认关系", AUX)
@@ -793,7 +843,7 @@ class Overlay:
 
         models = _Surface()
         box = QVBoxLayout(models)
-        box.setContentsMargins(16, 16, 16, 18)
+        box.setContentsMargins(16, 16, 16, 16)
         box.setSpacing(12)
         box.addWidget(_label("模型", BODY, INK, True))
         self._fetched = _Fetched()
@@ -1115,12 +1165,17 @@ class Overlay:
             self.log(f"[填入失败堆栈] {' '.join(traceback.format_exc().split())[:300]}")
             return
         self.set_status("已填入输入框，确认后自己按发送", "success")
+        card = next((c for c in self.cards if c._index == index), None)
+        if card is not None:
+            motion.fill_success(card)  # 被点的卡序号变 ✓，1.1 秒后还原
+        self.toast.show_text("已填入，确认后自己发送")
 
     def _copy(self, index):
         if self._busy or not self._current or index >= len(self.cands):
             return
         self.app.clipboard().setText(self.cands[index])
         self.set_status("回复已复制，可粘贴并修改。", "success")
+        self.toast.show_text("已复制，可粘贴修改")
 
     def _capture_toggled(self, on):
         """用户自己拨的开关：界面先改，再通知父进程去开/停采集。"""
@@ -1153,6 +1208,7 @@ class Overlay:
         if self._busy or self.cands:  # 正在生成或已有候选时，空态卡片本来就看不见
             return
         if not on:
+            self._empty_tone()
             self.emptyTitle.setText("采集已暂停")
             self.emptyHint.setText("聊天内容暂时不再读取。\n打开标题栏的开关，继续接收新消息。")
             self.setupButton.setVisible(not configured)
@@ -1168,19 +1224,59 @@ class Overlay:
             self.progress.start()
             self.set_status("正在根据新消息整理回复…", "busy")
             if not self.cands:
-                self.emptyTitle.setText("正在想一句合适的回复")
-                self.emptyHint.setText("正在结合上下文生成建议，稍等一下。")
-                self.setupButton.hide()
-                self.retryButton.hide()
+                self.empty.hide()  # 骨架屏顶替空态文案
+                self._show_skeletons()
         else:
             self.progress.stop()
+            self._remove_skeletons()
             if not self.cands:
                 self._empty_text()
+                self.empty.show()
         for card in self.cards:
             card.set_available(self._current and not busy)
 
+    def _show_skeletons(self):
+        """3 张骨架卡（两行/一行/两行，高度模拟真实卡），pulse 呼吸；生成中唯一的动效。"""
+        self._remove_skeletons()
+        for lines in (2, 1, 2):
+            card = _Surface()
+            card.setEnabled(False)  # 骨架不可点：禁用态不会触发悬停/按压动画
+            box = QVBoxLayout(card)
+            box.setContentsMargins(CARD_PAD_X, 12, CARD_PAD_X, 12)
+            box.setSpacing(8)
+            num = QFrame(card)
+            num.setFixedSize(20, 8)
+            num.setStyleSheet(f"QFrame {{ background: {SKELETON}; border-radius: 4px; }}")
+            box.addWidget(num)
+            for width in (272, 168)[:lines]:
+                bar = QFrame(card)
+                bar.setFixedSize(width, 12)
+                bar.setStyleSheet(f"QFrame {{ background: {SKELETON}; border-radius: 4px; }}")
+                box.addWidget(bar)
+            motion.pulse(card)
+            self.replyBox.addWidget(card)
+            self.skeletons.append(card)
+
+    def _remove_skeletons(self):
+        """先停动画再销毁：隐藏/销毁的控件上不得有运行中的动画。"""
+        for card in self.skeletons:
+            motion.stop_all(card)
+            self.replyBox.removeWidget(card)
+            card.hide()
+            card.deleteLater()
+        self.skeletons = []
+
+    def _empty_tone(self, danger=False):
+        """空态卡两种脸：默认白底灰字；出错 DANGER_SOFT 底 + DANGER 字。"""
+        self.empty.set_tone("danger" if danger else "normal")
+        color = DANGER if danger else SUB
+        for label in (self.emptyTitle, self.emptyHint):
+            qss = f"BodyLabel {{ color: {color}; background: transparent; }}"
+            setCustomStyleSheet(label, qss, qss)
+
     def _empty_text(self):
         """空态卡片的默认文案，配好没配好两套说法。"""
+        self._empty_tone()  # 回到白底灰字（出错态是红底红字）
         configured = settings.has_key()
         self.emptyTitle.setText("等待对方的新消息" if configured else "先设置，再开始")
         self.emptyHint.setText("对方发来新消息会自动生成；也可以点右上角 ⟳ 立即生成。"
@@ -1212,7 +1308,8 @@ class Overlay:
         if kind == "error" and self._busy:
             self.set_busy(False)
         if kind == "error" and not self.cands:
-            # 一句人话 + 一个动作：缺 key → 去设置；其它出错 → 重试
+            # 一句人话 + 一个动作：缺 key → 去设置；其它出错 → 重试。出错卡红底红字
+            self._empty_tone(danger=True)
             self.emptyTitle.setText("暂时没有可用的回复")
             self.emptyHint.setText("请按上方提示处理。收到新的对方消息后会再次尝试。")
             configured = settings.has_key()
@@ -1220,8 +1317,15 @@ class Overlay:
             self.retryButton.setVisible(configured)
 
     def _toggle_history(self):
-        self.feed.setVisible(self.feed.isHidden())
-        self._history_title()
+        """展开/收起都走 140ms 动画，不再瞬间切换；文案按最终态更新。"""
+        motion.stop_all(self.feed)  # 上一次动画没播完就再点：先停干净
+        if self.feed.isHidden():
+            self.feed.show()
+            motion.fade_in(self.feed)
+            motion.expand_in(self.feed)
+            self._history_title()
+        else:
+            motion.collapse_out(self.feed, on_finished=self._history_title)
 
     def _history_title(self):
         action = "展开" if self.feed.isHidden() else "收起"
@@ -1446,11 +1550,16 @@ class Overlay:
         self.insight.setVisible(bool(self.cands) or bool(self.latest.text()))
         if self.cands:
             self.set_status("建议已更新，选一句适合你的回复", "success")
+            # 新结果入场：等首帧布局完成（sizeHint 有效）再依次浮出；已销毁/被替换的卡自动跳过
+            cards = list(self.cards)
+            self.after(0, lambda: motion.stagger_in(
+                [c for c in cards if motion.alive(c) and c in self.cards]))
         else:
             self.set_status("未生成可用回复，请等待下一条新消息。", "error")
 
     def _clear_cards(self):
         for card in self.cards:
+            motion.stop_all(card)  # 销毁前停掉入场/呼吸等所有动画
             self.replyBox.removeWidget(card)
             card.hide()
             card.deleteLater()
