@@ -155,6 +155,10 @@ def read_images() -> bool:
     """对方最新发来的是图片时，截图/取原图一起发给起草模型看。默认开；关了图片只算「[图片]」三个字。"""
     return bool(_read("read_images", True))
 
+def show_gloss() -> bool:
+    """回复卡上显示中文意思（双语时的灰字对照）：默认开；关了只影响显示，不影响填入和缓存。"""
+    return bool(_read("show_gloss", True))
+
 def dock() -> bool:
     """悬浮窗贴靠当前聊天窗口：默认开。拖动标题栏会解除，标题栏图钉可以再开。"""
     return bool(_read("dock", True))
@@ -283,7 +287,8 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
          style_text: str | None = None, thinking_on: bool | None = None,
          check_update_on: bool | None = None, debug_view_on: bool | None = None,
          bilingual_on: bool | None = None, bilingual_lang_text: str | None = None,
-         dock_on: bool | None = None, read_images_on: bool | None = None) -> None:
+         dock_on: bool | None = None, read_images_on: bool | None = None,
+         show_gloss_on: bool | None = None) -> None:
     """每个参数为空/None = 保留当前值。两把 key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
     draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
@@ -320,6 +325,7 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "bilingual": flag(bilingual_on, bilingual),
         "dock": flag(dock_on, dock),
         "read_images": flag(read_images_on, read_images),
+        "show_gloss": flag(show_gloss_on, show_gloss),
         "bilingual_lang": keep(bilingual_lang_text, "bilingual_lang"),
     }
     with open(_CONFIG, "w", encoding="utf-8") as f:

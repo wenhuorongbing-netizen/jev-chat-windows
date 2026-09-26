@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import ctypes
 import ctypes.wintypes
 
-from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QActionGroup, QColor, QFont, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSizeGrip, QSizePolicy,
@@ -209,6 +209,59 @@ class _Surface(CardWidget):
         return self._normalBackgroundColor()
 
 
+class _GlossLabel(BodyLabel):
+    """回复卡的中文意思行：可选中手抄（TextSelectableByMouse）。
+    只是点一下（没拖出选区）算点卡填入——转发给卡片；拖出选区就是选文字，不填。"""
+
+    def __init__(self, text, card):
+        super().__init__(card)  # qfluentwidgets 的 overload 在子类里对 (text, parent) 分发有误，分开设
+        self.setText(text)
+        self._card = card
+        self.setTextFormat(Qt.PlainText)
+        self.setWordWrap(True)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        setFont(self, AUX, QFont.Normal)
+        qss = f"BodyLabel {{ color: {SUB}; background: transparent; }}"
+        setCustomStyleSheet(self, qss, qss)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and not self.hasSelectedText():
+            self._card.clicked.emit()  # 没选字 = 点卡填入（铁律不变）
+            return
+        super().mouseReleaseEvent(event)
+
+
+class _InsightCard(_Surface):
+    """「对方说」卡：右键按各行内容给「复制原文 / 复制译文」（空白行不出现对应项）。
+    复制是纯剪贴板行为，跟填入无关。"""
+
+    def __init__(self, owner):
+        super().__init__()
+        self._owner = owner
+
+    def _build_menu(self):
+        owner = self._owner
+        menu = RoundMenu(parent=self)
+        original = owner.latest.toolTip() or owner.latest.text()  # tooltip 是全文（省略前的）
+        if original:
+            action = Action("复制原文", self)
+            action.triggered.connect(lambda: owner._copy_text(original, "已复制"))
+            menu.addAction(action)
+        translation = owner.summary.text() if owner.summary.isVisible() else ""
+        if translation:
+            action = Action("复制译文", self)
+            action.triggered.connect(lambda: owner._copy_text(translation, "已复制"))
+            menu.addAction(action)
+        return menu
+
+    def contextMenuEvent(self, event):
+        menu = self._build_menu()
+        if menu.actions():
+            menu.exec(event.globalPos())
+
+
 class _Switch(SwitchButton):
     """标题栏采集开关：左键照常开/关，右键弹「暂停 30 分钟」。"""
 
@@ -353,8 +406,7 @@ class _ReplyCard(_Surface):
         self.gloss = None  # 中文意思：空、和正文重复、或对方说中文时这一行根本不存在
         gloss = owner.glosses[index] if index < len(owner.glosses) else ""
         if gloss:
-            self.gloss = _label(gloss, AUX, SUB)
-            self.gloss.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self.gloss = _GlossLabel(gloss, self)  # 可选中手抄；没拖出选区的点击仍算点卡填入
             box.addWidget(self.gloss)
         self.clicked.connect(lambda: owner._fill(index))
 
@@ -376,7 +428,8 @@ class _ReplyCard(_Surface):
         super().leaveEvent(event)
 
     def _build_menu(self):
-        """右键菜单：复制本条、换一条（重 roll；忙 / 非 current 时禁用）。"""
+        """右键菜单：复制本条、换一条（重 roll；忙 / 非 current 时禁用）、复制中文意思（有 gloss 才有）。
+        复制都是剪贴板行为，跟填入无关。"""
         menu = RoundMenu(parent=self)
         copy_action = Action("复制本条", self)
         copy_action.triggered.connect(lambda: self._owner._copy(self._index))
@@ -385,6 +438,11 @@ class _ReplyCard(_Surface):
         reroll_action.setEnabled(self._owner._current and not self._owner._busy)
         reroll_action.triggered.connect(lambda: self._owner._reroll(self._index))
         menu.addAction(reroll_action)
+        if self.gloss is not None:
+            gloss_action = Action("复制中文意思", self)
+            gloss_action.triggered.connect(
+                lambda: self._owner._copy_text(self.gloss.text(), "已复制中文意思"))
+            menu.addAction(gloss_action)
         return menu
 
     def contextMenuEvent(self, event):
@@ -399,10 +457,13 @@ class _ReplyCard(_Surface):
 
 
 class _ElideLine(BodyLabel):
-    """一句话分析：默认单行右省略，点一下在「单行省略 / 全文展开」间切换；tooltip 放全文。"""
+    """一行/一段文字的省略-展开：默认 N 行省略，点一下在「省略 / 全文」间切换；tooltip 放全文。
+    lines=1：单行右省略（分析行，总能点开）。lines=2：两行省略（「对方说」原文），
+    内容不超过两行时无交互、无省略号。"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, lines=1):
         super().__init__(parent)
+        self._lines = lines
         self.setTextFormat(Qt.PlainText)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -419,16 +480,50 @@ class _ElideLine(BodyLabel):
         self.setToolTip(self._full)
         self._render()
 
+    def _avail(self):
+        return self.width() if self.width() > 24 else 240
+
+    def _fits(self, text):
+        """全文在 N 行内摆得下吗（摆得下就不省略、不响应点击）。"""
+        if self._lines == 1:
+            return self.fontMetrics().horizontalAdvance(text) <= self._avail()
+        rect = self.fontMetrics().boundingRect(QRect(0, 0, self._avail(), 100000),
+                                               Qt.TextWordWrap, text)
+        return rect.height() <= self.fontMetrics().lineSpacing() * self._lines
+
+    def _elide_lines(self, text):
+        """按当前宽度把长文截到 N 行以内并补省略号（二分最长前缀）。"""
+        fm = self.fontMetrics()
+        limit = fm.lineSpacing() * self._lines
+        width = self._avail()
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            rect = fm.boundingRect(QRect(0, 0, width, 100000), Qt.TextWordWrap, text[:mid] + "…")
+            if rect.height() <= limit:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + "…"
+
     def _render(self):
-        self.setWordWrap(self._expanded)
-        if self._expanded:
+        if self._expanded or (self._lines > 1 and self._fits(self._full)):
+            self.setWordWrap(True)
+            self.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
             BodyLabel.setText(self, self._full)
+        elif self._lines == 1:
+            self.setWordWrap(False)
+            self.setMaximumHeight(16777215)
+            BodyLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.ElideRight,
+                                                                  self._avail()))
         else:
-            avail = self.width() if self.width() > 24 else 240
-            BodyLabel.setText(self, self.fontMetrics().elidedText(self._full, Qt.ElideRight, avail))
+            self.setWordWrap(True)
+            self.setMaximumHeight(self.fontMetrics().lineSpacing() * self._lines + 4)
+            BodyLabel.setText(self, self._elide_lines(self._full))
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._full:
+        if (event.button() == Qt.LeftButton and self._full
+                and (self._lines == 1 or not self._fits(self._full))):
             self._expanded = not self._expanded
             self._render()
         super().mousePressEvent(event)
@@ -739,7 +834,7 @@ class Overlay:
         body.addWidget(self.targetRow)
 
         # 对方说的：原文（灰，最多 2 行）+ 译文（黑粗体，双语且外语时才有）；Jev 模式下这张卡还放判断摘要
-        self.insight = _Surface()
+        self.insight = _InsightCard(self)
         insight_box = QVBoxLayout(self.insight)
         insight_box.setContentsMargins(CARD_PAD_X, CARD_PAD_Y, CARD_PAD_X, CARD_PAD_Y)
         insight_box.setSpacing(4)
@@ -750,9 +845,7 @@ class Overlay:
         self.tension.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         row.addWidget(self.tension)
         insight_box.addLayout(row)
-        self.latest = _label("", AUX, SUB)  # 对方原文：灰，最多 2 行，超长先按 160 字截断再限高
-        self.latest.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.latest.setMaximumHeight(self.latest.fontMetrics().lineSpacing() * 2 + 4)
+        self.latest = _ElideLine(lines=2)  # 对方原文：灰，默认 2 行省略，点击展开/收起
         insight_box.addWidget(self.latest)
         self.summary = _label("", BODY, INK, True)  # 译文 / 判断建议
         self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -1036,6 +1129,17 @@ class Overlay:
             "对方说中文就用中文回；说德语、英语等外语就翻成中文给你看，3 条回复用对方的语言写并附中文意思，"
             "填入只填外语。只要「起草」那把 key，不用 Jev / OpenRouter。关掉则用 Jev 判断 + 排序（要两把 key）。"
         ))
+        gloss_row = QHBoxLayout()
+        gloss_row.addWidget(_label("回复卡上显示中文意思", AUX), 1)
+        self.glossSwitch = SwitchButton()
+        self.glossSwitch.setOnText("开")
+        self.glossSwitch.setOffText("关")
+        self.glossSwitch.setAccessibleName("回复卡上显示中文意思")
+        gloss_row.addWidget(self.glossSwitch)
+        box.addLayout(gloss_row)
+        box.addWidget(self._hint(
+            "外语回复下面的那行中文对照。关掉只是不显示：填入照样只填外语，换一条和缓存都不受影响。"
+        ))
         images_row = QHBoxLayout()
         images_row.addWidget(_label("识别对方发来的图片", AUX), 1)
         self.imagesSwitch = SwitchButton()
@@ -1290,6 +1394,7 @@ class Overlay:
         self.contextBox.setValue(settings.context())
         self.targetSwitch.setChecked(settings.reply_target())
         self.bilingualSwitch.setChecked(settings.bilingual())
+        self.glossSwitch.setChecked(settings.show_gloss())
         self.imagesSwitch.setChecked(settings.read_images())
         self.jevBox.setVisible(not settings.bilingual())
         self._set_group(self.jev, settings.jev_provider(), settings.jev_model())
@@ -1341,7 +1446,8 @@ class Overlay:
                           thinking_on=self.thinkingSwitch.isChecked(),
                           check_update_on=self.updateSwitch.isChecked(),
                           bilingual_on=bilingual,
-                          read_images_on=self.imagesSwitch.isChecked())
+                          read_images_on=self.imagesSwitch.isChecked(),
+                          show_gloss_on=self.glossSwitch.isChecked())
         except Exception:
             self._settings_feedback("保存失败，请检查配置文件是否可写后重试。", error=True)
             return
@@ -1437,7 +1543,7 @@ class Overlay:
         self.cands[index] = text
         while len(self.glosses) < len(self.cands):
             self.glosses.append("")
-        self.glosses[index] = gloss
+        self.glosses[index] = gloss if settings.show_gloss() else ""  # 换一条同样遵守显示开关
         position = next((i for i, c in enumerate(self.cards) if c._index == index), None)
         if position is None:
             return
@@ -1678,10 +1784,14 @@ class Overlay:
         self._history_title()
 
     def _show_latest(self, text):
-        self.latest.setText(text if len(text) <= 160 else text[:160] + "…")
-        self.latest.setToolTip(text)
+        self.latest.set_full(text)  # 2 行省略/点击展开都交给 _ElideLine；tooltip 始终是全文
         if text:
             self.insight.show()
+
+    def _copy_text(self, text, toast):
+        """纯剪贴板行为（与填入无关）：复制任意一行 + pill 反馈。"""
+        self.app.clipboard().setText(text)
+        self.toast.show_text(toast)
 
     def current_chat(self):
         """界面上正在看的会话（不一定是微信当前开着的那个）。"""
@@ -1949,9 +2059,11 @@ class Overlay:
         self.cands = result["candidates"]
         lang = result.get("lang") or ""
         raw_glosses = result.get("glosses") or []
-        # 中文意思过一遍显示规则：空、和正文重复、或对方说中文时滤掉，卡片就不创建灰字行
-        self.glosses = [shown_gloss(self.cands[i], raw_glosses[i] if i < len(raw_glosses) else "", lang)
-                        for i in range(len(self.cands))]
+        # 中文意思过一遍显示规则：空、和正文重复、或对方说中文时滤掉，卡片就不创建灰字行；
+        # 设置里关了「回复卡上显示中文意思」也在这里叠加（纯显示层：填入/换一条/缓存不受影响）
+        allow = settings.show_gloss()
+        self.glosses = [(shown_gloss(self.cands[i], raw_glosses[i] if i < len(raw_glosses) else "", lang)
+                         if allow else "") for i in range(len(self.cands))]
         self.set_busy(False)
         self._current = bool(self.cands)
         self._clear_cards()

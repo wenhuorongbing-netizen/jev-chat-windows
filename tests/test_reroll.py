@@ -116,7 +116,7 @@ class TestRerollMenu:
     def test_menu_has_reroll_below_copy_and_enabled(self, overlay):
         overlay.show(FOREIGN)
         menu = overlay.cards[0]._build_menu()
-        assert [a.text() for a in menu.actions()] == ["复制本条", "换一条"]
+        assert [a.text() for a in menu.actions()] == ["复制本条", "换一条", "复制中文意思"]
         assert menu.actions()[1].isEnabled()
 
     def test_reroll_disabled_when_busy(self, overlay):
