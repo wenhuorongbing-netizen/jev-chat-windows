@@ -124,10 +124,25 @@ class Reader:
         """去重（滚动不重复）→ 这一帧里真正新出现的 [(who, name, text)]。
         本帧有已知行时只要已知行下方的：往上滚翻出来的旧消息在已知行上方，不算。
         本帧一行已知的都没有（大图把旧文字全顶出去了、切了聊天、滚远了）：全算，宁可多算不能漏。
+        增长后缀：同一方连发两条被合并成一行（y 是老气泡顶、text 是老+新，如「我也在瞪22」），
+        floor 把它滤掉、全文又和 seen ≥0.75 相似——把比 seen 文本多出来的后缀当新行发，
+        不受 floor 限制（合并行的 y 是陈旧的）。suffix 已在 seen 就不发：上一帧分行报过、
+        这一帧才合并的情形不能重复。发出的后缀立刻进 seen，否则同一合并行每帧都刷一次。
         ponytail: 同一人连发两句一模一样的会吞一句——对触发分析无害。"""
         known_y = [y for w, n, t, y in lines if self._seen(w, n, t)]
         floor = max(known_y) if known_y else -1
         new = [(w, n, t) for w, n, t, y in lines if y > floor and not self._seen(w, n, t)]
+        for w, n, t, y in lines:
+            if y > floor:
+                continue  # 已被 floor 放行的行走正常路径，不看后缀
+            prefix = max((s for sw, _, s in self.seen if sw == w and s and t.startswith(s)
+                          and len(t) > len(s)), key=len, default=None)
+            if prefix is None:
+                continue
+            suffix = t[len(prefix):]
+            if not any(similar(suffix, s) for _, _, s in self.seen):
+                new.append((w, n, suffix))
+                self.seen.append((w, n, suffix))
         self.seen.extend((w, n, t) for w, n, t, _ in lines if not self._seen(w, n, t))
         del self.seen[:-500]
         return new

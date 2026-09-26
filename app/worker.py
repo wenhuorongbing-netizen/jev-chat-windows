@@ -8,13 +8,41 @@ import traceback
 
 import numpy as np
 
+from app import settings
 from app.capture import Capture, chat_area, unminimize
+from app.image_bubbles import find_her_image
 from app.ocr import Reader, read_title, similar
 
 
 def _err(q):
     """异常压成一行发给父进程，子进程的 stderr 一般没人看得见。"""
     q.put(("status", " ".join(traceback.format_exc().split())[-200:]))
+
+
+def _check_image(q, title, crop, full, x0, y0, bg, rect, img_seen, img_seeded):
+    """对方发来的图片：在消息区帧里找图片泡泡，ahash 新鲜才上报（首帧只播种，避免历史图刷屏）。
+    顺序：跟在文本 new 后面发，main.py 只看 new[-1].who == "her" 触发生成，图就能跟着最新状态进分析。
+    抓不到/出错就当没这回事，不耽误文本流程。b64 只在内存里过队列：不落盘、不进日志。"""
+    try:
+        found = find_her_image(crop, bg)
+        hashes = img_seen.setdefault(title, set())
+        b64 = None
+        if found:
+            (ix0, iy0, ix1, iy1), h = found
+            if h not in hashes and title in img_seeded:
+                from PIL import Image
+
+                from app.images import _encode
+
+                b64 = _encode(Image.fromarray(full[y0 + iy0:y0 + iy1, x0 + ix0:x0 + ix1]))
+            hashes.add(h)
+            if len(hashes) > 200:  # 封顶 200：超了丢一半，老图滚回来最多多报一次
+                img_seen[title] = set(list(hashes)[-100:])
+        img_seeded.add(title)
+        if b64:
+            q.put(("lines", title, [("her", None, "[图片]", b64)], rect))
+    except Exception:
+        pass
 
 
 def _packet(full, area, title, reader, lines):
@@ -37,6 +65,8 @@ def run(q, hwnd, enabled, debug_on):
     ctypes.windll.user32.SetProcessDPIAware()
     cap = None
     readers = {}  # {会话名: Reader}，一个会话一套去重状态
+    img_seen = {}  # {会话名: {图片 ahash}}，封顶 200
+    img_seeded = set()  # 已播过种的会话：首帧只记 hash 不上报，避免历史图刷屏
     title, head = "", None  # 当前会话名 / 上一帧的头部像素
     last_area = None  # 上次发给父进程的 4 元组，变了才再发一次
     warned = False  # 消息区识别失败是否已经报过，拖窗口时别每帧刷一条
@@ -95,10 +125,13 @@ def run(q, hwnd, enabled, debug_on):
                             title = name
                             q.put(("chat", title))
                     reader = readers.setdefault(title, Reader())
-                    lines = reader.read(full[y0:y1, x0:x1], bg)
+                    crop_lines = full[y0:y1, x0:x1]
+                    lines = reader.read(crop_lines, bg)
                     new = reader.new_lines(lines)
                     if new:
                         q.put(("lines", title, new, rect))
+                    if settings.read_images():  # 微信帧就在内存里，直接裁，不用 PrintWindow
+                        _check_image(q, title, crop_lines, full, x0, y0, bg, rect, img_seen, img_seeded)
                 if debug_on.is_set():
                     q.put(("debug", _packet(full, area, title, reader, lines)))
         except Exception:
