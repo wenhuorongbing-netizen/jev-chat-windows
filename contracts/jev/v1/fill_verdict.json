@@ -1,0 +1,77 @@
+{
+  "contract": "fill_verdict",
+  "version": 1,
+  "doc": "May a reply that was generated for `target` be written into the input box of what is on screen now (`live`)? The live side is READ FRESH right before the write, not taken from a cache. Messages are [side, text] with side 'her' or 'me'. `expect` is the shared decision; a platform-specific `expect_android` / `expect_windows` overrides it and marks a known divergence that S2 has to close (or keep on purpose). A false refusal (copy instead) is acceptable, a false fill never is.",
+  "proof_rules": {
+    "android": "the last 6 visible messages ('side:text' joined) must equal the ones at generation, and be non-empty",
+    "windows": "the newest visible message (side, text) must equal the one at generation"
+  },
+  "cases": [
+    {
+      "name": "same conversation, nothing changed",
+      "target": {"conversation": "小王", "messages": [["her", "在吗"], ["me", "在"], ["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": true, "conversation": "小王", "messages": [["her", "在吗"], ["me", "在"], ["her", "明天见面吗"]]},
+      "expect": "allow"
+    },
+    {
+      "name": "switched to another conversation",
+      "target": {"conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": true, "conversation": "老李", "messages": [["her", "吃了吗"]]},
+      "expect": "deny"
+    },
+    {
+      "name": "same title, another chat with the same name (different newest message)",
+      "target": {"conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": true, "conversation": "小王", "messages": [["her", "在吗"]]},
+      "expect": "deny"
+    },
+    {
+      "name": "same title, a new message arrived",
+      "target": {"conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": true, "conversation": "小王", "messages": [["her", "明天见面吗"], ["her", "在吗？"]]},
+      "expect": "deny"
+    },
+    {
+      "name": "same title, the window shows no messages (empty tree / scrolled away)",
+      "target": {"conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": true, "conversation": "小王", "messages": []},
+      "expect": "deny"
+    },
+    {
+      "name": "the candidate carries no generation proof",
+      "target": {"conversation": "小王", "messages": []},
+      "live": {"on_chat_screen": true, "conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "expect": "deny"
+    },
+    {
+      "name": "not a chat screen (list / settings / payment page with an editable node)",
+      "target": {"conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": false, "conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "expect": "deny"
+    },
+    {
+      "name": "only an older message differs, the newest is the same",
+      "target": {"conversation": "小王", "messages": [["her", "a"], ["me", "b"], ["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": true, "conversation": "小王", "messages": [["her", "x"], ["me", "b"], ["her", "明天见面吗"]]},
+      "expect": "deny",
+      "expect_windows": "allow",
+      "divergence": "Windows compares only the newest message; Android compares the last 6."
+    },
+    {
+      "name": "the live title cannot be read, messages match",
+      "target": {"conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": true, "conversation": null, "messages": [["her", "明天见面吗"]]},
+      "expect": "deny",
+      "expect_android": "allow",
+      "divergence": "Android lets matching messages stand in for an unreadable title; Windows refuses without a readable title."
+    },
+    {
+      "name": "the candidate has no conversation title, messages match",
+      "target": {"conversation": "", "messages": [["her", "明天见面吗"]]},
+      "live": {"on_chat_screen": true, "conversation": "小王", "messages": [["her", "明天见面吗"]]},
+      "expect": "deny",
+      "expect_android": "allow",
+      "divergence": "Android treats a blank target title as unusable and relies on the messages; Windows refuses a candidate without a conversation."
+    }
+  ]
+}

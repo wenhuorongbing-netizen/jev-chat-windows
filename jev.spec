@@ -12,7 +12,8 @@ hiddenimports = [
     "app.worker", "app.capture", "app.ocr", "app.fill", "app.overlay", "app.settings",
     "app.version", "app.update", "app.debugwin",  # debugwin 是开了调试视图才 import 的
     "core.engine", "core.draft", "core.jev_client", "core.questions", "core.providers",
-    "core.llm",
+    "core.llm", "core.keygate", "core.fill_guard", "core.image_policy",
+    "app.uia", "app.uia_worker", "app.images",  # UIA 子进程和抓图；uiautomation / comtypes 是函数内 import
 ]
 datas, binaries = [], []
 datas += [("docs/wechat-mp.png", "docs")]  # 设置页底部的公众号长条横幅
@@ -26,6 +27,8 @@ for pkg in (
     "typesafe_sdk",
     "anthropic",
     "google.genai",
+    "uiautomation",          # QQ / WhatsApp 的 UI 自动化（app/uia.py 函数内 import，静态分析扫不到）
+    "comtypes",              # uiautomation 的 COM 层，含生成的类型库包装
     "certifi",               # httpx 的 CA 证书包；certifi 的官方 hook 通常收得到，这里写明白省得漏
 ):
     d, b, h = collect_all(pkg)

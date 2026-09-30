@@ -70,7 +70,9 @@ CUSTOM = ("custom_openai", "custom_anthropic")
 
 
 def _origin(url: str) -> str:
-    """scheme://host[:port]，小写，默认端口省掉；不是合法地址返回空。路径、大小写、结尾斜杠都不算。"""
+    """scheme://host[:port]，小写，默认端口省掉，IPv6 主机保留方括号。只有 http / https 算 origin，
+    其余（没协议、没主机、别的协议、解析不了）返回空。路径、大小写、结尾斜杠都不算。
+    口径跟 Android 一份（contracts/jev/v1/origin.json）。"""
     from urllib.parse import urlsplit
 
     try:
@@ -78,11 +80,13 @@ def _origin(url: str) -> str:
         host, port = p.hostname, p.port
     except ValueError:
         return ""
-    if not p.scheme or not host:
+    scheme = p.scheme.lower()
+    if scheme not in ("http", "https") or not host:
         return ""
-    default = {"https": 443, "http": 80}.get(p.scheme.lower())
+    default = {"https": 443, "http": 80}[scheme]
     tail = f":{port}" if port not in (None, default) else ""
-    return f"{p.scheme.lower()}://{host.lower()}{tail}"
+    host = f"[{host}]" if ":" in host else host.lower()
+    return f"{scheme}://{host}{tail}"
 
 
 def draft_route(provider: str, base_url: str = "") -> str:

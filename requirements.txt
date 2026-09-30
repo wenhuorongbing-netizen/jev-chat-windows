@@ -11,6 +11,12 @@ typesafe-sdk                  # Jev judging over TypeSafe direct (api.typesafe.a
 anthropic                     # Anthropic Messages
 google-genai                  # Google Gemini
 
-# optional, only for the two old UIA probes (already disproved; install to reproduce)
-# uiautomation                # probe_win.py / probe_win2.py
+# QQ / WhatsApp reading and filling go through UI Automation (app/uia.py, app/fill.py): a real runtime dependency.
+# It was commented out as "probe only", so a clean install (CI, release build) shipped without it.
+uiautomation                  # pulls in comtypes
+
+# optional, only for an old probe (already disproved; install to reproduce)
 # winsdk                      # probe_notify.py
+
+# exact versions used by tests and release builds live in constraints.txt:
+#   pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt

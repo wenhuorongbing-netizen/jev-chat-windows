@@ -35,3 +35,13 @@ def check_fresh(chat: str, newest: tuple | None, fresh_chat: str | None,
     if not fresh_msgs or tuple(fresh_msgs[-1]) != tuple(newest):
         return "会话里有新消息或已滚动，候选可能过期，没有填入"
     return None
+
+
+# 今天各 App 怎么填（契约 contracts/jev/v1/fill_support.json 的 Windows 一半；测试拿它对 app/uia.PARSERS 和契约文件）：
+#   fresh-verified = 打字前重读窗口并比对通过才填；
+#   legacy-not-fresh-verified = 还按一秒前 worker 报的会话名填，S2 必须改成 fresh-verified 或 copy-only，不设永久例外。
+FILL_SUPPORT = {
+    "qq": "fresh-verified",
+    "whatsapp": "fresh-verified",
+    "wechat": "legacy-not-fresh-verified",
+}

@@ -55,8 +55,9 @@ def _status_of(exc: Exception) -> int | None:
     return None
 
 
-_STATUS_HINT = {401: "密钥被拒", 403: "没有权限", 404: "模型或地址不对", 400: "请求被拒", 422: "请求被拒",
-                402: "余额或额度不足", 429: "被限流", 529: "服务过载"}
+_STATUS_HINT = {401: "密钥被拒，请检查该接口的密钥", 403: "密钥被拒，请检查该接口的密钥", 404: "地址或模型名不对",
+               400: "请求被拒绝，请检查模型名和接口地址", 422: "请求被拒绝，请检查模型名和接口地址",
+               402: "账户余额或额度不足", 429: "服务繁忙，请稍后再试", 529: "服务繁忙，请稍后再试"}  # 文案跟 Android 一份（contracts/jev/v1/http_hint.json）
 
 
 def hint_for(status: int | None) -> str:
@@ -254,6 +255,13 @@ if __name__ == "__main__":
     list_models = lambda p, k: _lm(p, Credential(  # noqa: E731
         k, destination_of(p, TYPESAFE_BASE if p == "typesafe" else OPENROUTER_KEY_URL)))
 
+    # 直接跑本文件时 app 包不在 sys.path，绑定记录读不了会被拒（fail closed）；自测把根目录补上，
+    # 并让设置指向一个不存在的文件（= 没有绑定记录），免得读到开发者本机真实的 config.json
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from app import settings as _settings
+    _settings._CONFIG = os.path.join(os.environ.get("TEMP", "."), "jev-selftest-missing.json")
+
     os.environ.pop(JEV_ENV, None)
     os.environ["OPENROUTER_API_KEY"] = "or-key"  # 老名字：新名字没设时该退回它
     assert _api_key(JEV_ENV) == "or-key"
@@ -322,7 +330,7 @@ if __name__ == "__main__":
             ask({"chat": {}}, questions, provider="typesafe")
             raise SystemExit("应当抛错")
         except JevError as e:
-            assert e.status == 429 and "被限流" in str(e)
+            assert e.status == 429 and "服务繁忙" in str(e)
 
     # OpenRouter 那条没动：还是自己拼 body、打 /api/alpha/decisions
     body = {"answers": {"best_reply": {"type": "choice", "choice": "reply_a"}}, "usage": {}}
@@ -368,7 +376,7 @@ if __name__ == "__main__":
             list_models("openrouter", "or-key")
             raise SystemExit("应当抛错")
         except JevError as e:
-            assert "HTTP 429" in str(e) and "被限流" in str(e) and "rate limited" not in str(e)
+            assert "HTTP 429" in str(e) and "服务繁忙" in str(e) and "rate limited" not in str(e)
 
     assert redact_secrets("key=ts-key or-key") == "key=[REDACTED] [REDACTED]"
     print("jev_client ok")

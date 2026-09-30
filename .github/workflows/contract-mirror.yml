@@ -1,0 +1,27 @@
+name: contract-mirror
+
+# contracts/jev/v1 的正本在 Android 仓库，这里是逐字节镜像；两边对不上就红。
+# 单独一个 workflow、不进 release 的复用链：Android 分支改名/删除只会让这一项红，不会挡住 Windows 发布。
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      # Android 仓库里契约所在的分支；两个仓库现在分支名不同，合并到 main 后把仓库变量 JEV_CONTRACT_REF 设成 main
+      CONTRACT_REF: ${{ vars.JEV_CONTRACT_REF || 'feat/whatsapp-bilingual' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 跟 Android 仓库的正本逐字节比对（公开仓库，匿名克隆）
+        run: |
+          git clone --depth 1 --branch "$CONTRACT_REF" https://github.com/wenhuorongbing-netizen/jev-chat-jarvis.git /tmp/android
+          diff -r /tmp/android/contracts/jev/v1 contracts/jev/v1
+          (cd contracts/jev/v1 && sha256sum -c MANIFEST.sha256)

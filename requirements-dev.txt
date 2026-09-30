@@ -1,0 +1,2 @@
+# ASCII only (see requirements.txt). Test tooling; not shipped in the release build.
+pytest

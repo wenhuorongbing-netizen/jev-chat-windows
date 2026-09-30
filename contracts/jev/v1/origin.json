@@ -1,0 +1,33 @@
+{
+  "contract": "origin",
+  "version": 1,
+  "doc": "An API key may only be sent to the origin it is bound to. origin = scheme://host[:port], scheme and host lower-case, default port (443 for https, 80 for http) omitted, IPv6 hosts keep their brackets. Only http and https are origins; anything else (no scheme, no host, other scheme, unparseable) is null and never matches anything. Path, query, fragment, trailing slash and surrounding whitespace do not count.",
+  "origin_cases": [
+    {"name": "plain https with path", "url": "https://api.deepseek.com/v1", "origin": "https://api.deepseek.com"},
+    {"name": "case and explicit default port", "url": "https://API.DeepSeek.com:443/v1/", "origin": "https://api.deepseek.com"},
+    {"name": "http keeps http", "url": "http://api.deepseek.com", "origin": "http://api.deepseek.com"},
+    {"name": "non-default port is part of the origin", "url": "https://api.deepseek.com:8443/x", "origin": "https://api.deepseek.com:8443"},
+    {"name": "http default port omitted", "url": "http://localhost:80/v1", "origin": "http://localhost"},
+    {"name": "local model server", "url": "http://localhost:11434/v1", "origin": "http://localhost:11434"},
+    {"name": "userinfo does not make the host", "url": "https://api.deepseek.com@evil.example/v1", "origin": "https://evil.example"},
+    {"name": "surrounding whitespace", "url": "  https://x.example/  ", "origin": "https://x.example"},
+    {"name": "upper-case scheme", "url": "HTTPS://X.EXAMPLE", "origin": "https://x.example"},
+    {"name": "ipv6 keeps brackets", "url": "https://[::1]:8080/v1", "origin": "https://[::1]:8080"},
+    {"name": "trailing dot is a different host", "url": "https://api.deepseek.com./v1", "origin": "https://api.deepseek.com."},
+    {"name": "empty", "url": "", "origin": null},
+    {"name": "no scheme", "url": "api.deepseek.com", "origin": null},
+    {"name": "scheme only", "url": "https://", "origin": null},
+    {"name": "other scheme is not an origin", "url": "ftp://files.example/x", "origin": null},
+    {"name": "file scheme is not an origin", "url": "file:///etc/hosts", "origin": null}
+  ],
+  "same_origin_cases": [
+    {"name": "same host different path", "a": "https://api.deepseek.com/v1", "b": "https://api.deepseek.com/anthropic", "same": true},
+    {"name": "case and default port", "a": "https://API.deepseek.com:443", "b": "https://api.deepseek.com", "same": true},
+    {"name": "https vs http", "a": "https://api.deepseek.com", "b": "http://api.deepseek.com", "same": false},
+    {"name": "different port", "a": "https://api.deepseek.com", "b": "https://api.deepseek.com:8443", "same": false},
+    {"name": "userinfo trick", "a": "https://api.deepseek.com", "b": "https://api.deepseek.com@evil.example", "same": false},
+    {"name": "lookalike suffix", "a": "https://api.deepseek.com", "b": "https://api.deepseek.com.evil.example", "same": false},
+    {"name": "two invalid values never match", "a": "", "b": "", "same": false},
+    {"name": "two non-http values never match", "a": "ftp://x.example", "b": "ftp://x.example", "same": false}
+  ]
+}

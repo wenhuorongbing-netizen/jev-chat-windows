@@ -7,10 +7,16 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # 建 Release 要写权限
+  contents: read
 
 jobs:
+  test:  # 发布门禁：测试不过就不打包
+    uses: ./.github/workflows/test.yml
+
   build:
+    permissions:
+      contents: write  # 建 Release 要写权限，只给发布这个 job
+    needs: test
     runs-on: windows-latest  # 只能在 Windows 上打，PyInstaller 不能交叉编译
     steps:
       - uses: actions/checkout@v4
@@ -23,14 +29,25 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'  # 跟 test.yml / constraints.txt 同一个解释器：发出去的就是测过的
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
 
-      - name: 装依赖
-        run: pip install -r requirements.txt pyinstaller
+      - name: 装依赖（版本按 constraints.txt 钉死）
+        run: pip install -r requirements.txt pyinstaller -c constraints.txt
 
       - name: 打包
         run: pyinstaller --noconfirm --clean jev.spec
+
+      - name: 检查包里带了 UI 自动化（QQ / WhatsApp 要用）
+        shell: pwsh
+        run: |
+          foreach ($pkg in 'uiautomation', 'comtypes') {
+            $hit = Get-ChildItem -Path 'dist\jev-chat-windows' -Recurse -Directory -Filter $pkg | Select-Object -First 1
+            if (-not $hit) { throw "打出来的包里没有 $pkg" }
+          }
 
       - name: 压 zip（tag 用 tag 名，手动触发用短 SHA）
         id: pack

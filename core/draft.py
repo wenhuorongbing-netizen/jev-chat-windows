@@ -304,20 +304,28 @@ def _parse_bilingual(content: str) -> dict:
     """{"translation": str, "replies": [{"text","zh"}]} → {"translation", "candidates", "glosses"}。"""
     content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.MULTILINE).strip()
     start, end = content.find("{"), content.rfind("}")
+    # 三条失败文案跟 Android 一份（contracts/jev/v1/reply_parse.json），都不带模型原文：它可能把聊天内容复述回来
     if start < 0 or end <= start:
-        raise JevError("双语结果不是 JSON")  # 不带模型原文：它可能把聊天内容复述回来
+        raise JevError("模型没有返回 JSON")
     try:
         obj = json.loads(content[start:end + 1])
-    except ValueError as e:
-        raise JevError(f"双语结果解析失败: {e}") from e
+    except ValueError:
+        raise JevError("模型返回的 JSON 无法解析") from None
+    replies = obj.get("replies") if isinstance(obj, dict) else None
     cands, glosses = [], []
-    for r in obj.get("replies") or []:
-        text = str((r or {}).get("text") or "").strip() if isinstance(r, dict) else str(r).strip()
+    for r in replies if isinstance(replies, list) else []:
+        if isinstance(r, dict):  # 正文和中文意思跟着同一条走；null 不是字符串 "None"
+            text, zh = r.get("text"), r.get("zh")
+        elif isinstance(r, str):
+            text, zh = r, None
+        else:
+            continue
+        text = "" if text is None else str(text).strip()
         if text:
             cands.append(text)
-            glosses.append(str(r.get("zh") or "").strip() if isinstance(r, dict) else "")
+            glosses.append("" if zh is None else str(zh).strip())
     if not cands:
-        raise JevError("双语结果里没有候选回复")
+        raise JevError("模型没有给出候选回复")
     return {"lang": str(obj.get("lang") or "").strip(),
             "analysis": str(obj.get("analysis") or "").strip(),
             "translation": str(obj.get("translation") or "").strip(),

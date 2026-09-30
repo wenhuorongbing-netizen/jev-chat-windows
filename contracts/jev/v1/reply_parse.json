@@ -1,0 +1,75 @@
+{
+  "contract": "reply_parse",
+  "version": 1,
+  "doc": "Bilingual reply payload as a model returns it (translation + replies[{text, zh}] + lang + analysis) -> the parsed result. Rules: the payload is the outermost {...} in the text (prose and code fences around it are ignored); a reply is an object {text, zh} or a bare string; blank / null texts are dropped and each kept text keeps ITS OWN gloss; at most 3 replies; every string is trimmed; missing fields are empty strings. Failure messages are fixed text and never contain any of the model's output (it may quote the chat back). Platform extensions (Android also reads 'relations') are outside v1.",
+  "errors": {
+    "no_json": "模型没有返回 JSON",
+    "bad_json": "模型返回的 JSON 无法解析",
+    "no_replies": "模型没有给出候选回复"
+  },
+  "cases": [
+    {
+      "name": "plain payload",
+      "content": "{\"lang\":\"德语\",\"analysis\":\"寒暄\",\"translation\":\"你最近怎么样\",\"replies\":[{\"text\":\"Gut, danke!\",\"zh\":\"挺好，谢谢\"},{\"text\":\"Alles klar.\",\"zh\":\"都好\"},{\"text\":\"Und dir?\",\"zh\":\"你呢\"}]}",
+      "expect": {"lang": "德语", "analysis": "寒暄", "translation": "你最近怎么样",
+                 "candidates": ["Gut, danke!", "Alles klar.", "Und dir?"], "glosses": ["挺好，谢谢", "都好", "你呢"]}
+    },
+    {
+      "name": "code fence and prose around the payload",
+      "content": "好的：\n```json\n{\"translation\":\"t\",\"replies\":[{\"text\":\"a\",\"zh\":\"甲\"}]}\n```\n以上。",
+      "expect": {"lang": "", "analysis": "", "translation": "t", "candidates": ["a"], "glosses": ["甲"]}
+    },
+    {
+      "name": "more than three replies keeps the first three",
+      "content": "{\"replies\":[{\"text\":\"1\",\"zh\":\"一\"},{\"text\":\"2\",\"zh\":\"二\"},{\"text\":\"3\",\"zh\":\"三\"},{\"text\":\"4\",\"zh\":\"四\"}]}",
+      "expect": {"lang": "", "analysis": "", "translation": "", "candidates": ["1", "2", "3"], "glosses": ["一", "二", "三"]}
+    },
+    {
+      "name": "bare string replies are accepted, no gloss",
+      "content": "{\"replies\":[\"Ja\",\"Nein\"]}",
+      "expect": {"lang": "", "analysis": "", "translation": "", "candidates": ["Ja", "Nein"], "glosses": ["", ""]}
+    },
+    {
+      "name": "missing zh is an empty gloss",
+      "content": "{\"replies\":[{\"text\":\"Ja\"}]}",
+      "expect": {"lang": "", "analysis": "", "translation": "", "candidates": ["Ja"], "glosses": [""]}
+    },
+    {
+      "name": "blank text is dropped and the gloss stays with its own reply",
+      "content": "{\"replies\":[{\"text\":\"  \",\"zh\":\"孤儿\"},{\"text\":\"a\",\"zh\":\"甲\"}]}",
+      "expect": {"lang": "", "analysis": "", "translation": "", "candidates": ["a"], "glosses": ["甲"]}
+    },
+    {
+      "name": "null text is dropped, never the word null",
+      "content": "{\"replies\":[{\"text\":null,\"zh\":\"无\"},{\"text\":\"b\",\"zh\":\"乙\"}]}",
+      "expect": {"lang": "", "analysis": "", "translation": "", "candidates": ["b"], "glosses": ["乙"]}
+    },
+    {
+      "name": "every string is trimmed",
+      "content": "{\"lang\":\" 德语 \",\"translation\":\" t \",\"replies\":[{\"text\":\" a \",\"zh\":\" 甲 \"}]}",
+      "expect": {"lang": "德语", "analysis": "", "translation": "t", "candidates": ["a"], "glosses": ["甲"]}
+    },
+    {
+      "name": "no replies at all",
+      "content": "{\"translation\":\"t\"}",
+      "error": "no_replies"
+    },
+    {
+      "name": "only blank replies",
+      "content": "{\"replies\":[{\"text\":\"\"},{\"text\":null}]}",
+      "error": "no_replies"
+    },
+    {
+      "name": "no json in the text",
+      "content": "抱歉，CHATMARKER-老王说明晚八点见，我无法回复。",
+      "error": "no_json",
+      "must_not_leak": "CHATMARKER"
+    },
+    {
+      "name": "broken json that quotes the chat",
+      "content": "{\"translation\": CHATMARKER-老王说明晚八点见, \"replies\": [}",
+      "error": "bad_json",
+      "must_not_leak": "CHATMARKER"
+    }
+  ]
+}

@@ -284,6 +284,23 @@ def _bindings() -> dict:
     v = _read("key_bindings", {})
     return dict(v) if isinstance(v, dict) else {}
 
+def bindings_state() -> dict | None:
+    """key 绑定记录，区分「没有」和「读不了」：文件不存在 / 没有 key_bindings 字段 = {}（老版本存的 key，还没绑过），
+    文件在但打不开、不是合法 JSON 或 key_bindings 类型不对 = None（读不了，调用方必须拒发，不能当成没绑）。"""
+    try:
+        with open(_CONFIG, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    v = data.get("key_bindings")
+    if v is None:
+        return {}
+    return dict(v) if isinstance(v, dict) else None
+
 def _current_route(env_name: str, jev_provider_now: str | None = None) -> str:
     return jev_route(jev_provider_now or jev_provider()) if env_name == JEV_ENV else draft_route(draft_provider(), draft_base_url())
 

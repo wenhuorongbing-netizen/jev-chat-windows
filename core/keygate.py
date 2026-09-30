@@ -7,12 +7,14 @@ key 和「它准备发往的接口」在同一个不可变对象里，发出前�
 
 Credential 只能由两个入口造：
 - stored_credential：存下来的 key。它绑定的接口（config.json 的 key_bindings，只记接口不含 key）
-  跟目的地不一致就抛 KeyRouteError；没有绑定记录（老版本存的 key）照旧放行，save() 换来源前会先绑上。
+  按 BindingState 四种状态各有一个结局：对得上放行、对不上抛 KeyRouteError、没有绑定记录（老版本存的 key）
+  临时放行（save() 换来源前会先绑上，S3 迁移）、记录读不了（配置损坏）拒发。
 - typed_credential：用户刚在设置页里为当前所选接口敲的 key，接口就是页面上选的那个。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 try:  # 当模块导入 / 当脚本直接跑 都能用
     from .providers import _origin
@@ -48,20 +50,54 @@ def destination_of(protocol: str, base_url: str | None) -> str:
     return _origin(base_url or "") or _DEFAULT_DESTINATION.get(protocol, f"provider:{protocol}")
 
 
-def _bound_route(env: str) -> str | None:
+class BindingState(str, Enum):
+    """存下来的 key 跟目的地的绑定关系，四种、每种只有一个结局（contracts/jev/v1/credential_binding.json）。
+    「没有记录」和「记录读不了」必须分开：以前两者都是 None，读不了也被当成老 key 放行。"""
+    BOUND_MATCH = "BOUND_MATCH"                # 绑定 == 目的地 → 发
+    BOUND_MISMATCH = "BOUND_MISMATCH"          # 绑定 != 目的地 → 拒
+    LEGACY_UNBOUND = "LEGACY_UNBOUND"          # 读得了、但这把 key 没有记录（老版本存的）→ 发，临时兼容，S3 迁移
+    BINDING_UNAVAILABLE = "BINDING_UNAVAILABLE"  # 记录读不了（配置损坏 / 设置模块加载不了）→ 拒
+
+
+# 各状态该不该发；stored_credential 只认这张表
+SENDS = {BindingState.BOUND_MATCH: True, BindingState.BOUND_MISMATCH: False,
+         BindingState.LEGACY_UNBOUND: True, BindingState.BINDING_UNAVAILABLE: False}
+
+
+def _read_bindings() -> dict | None:
+    """全部绑定记录；None = 读不了。绑定记录在 config.json，由设置模块读；core 平时不认识 app。"""
     try:
-        from app import settings  # 绑定记录在 config.json，由设置模块读；core 平时不认识 app
-    except ImportError:
+        from app import settings
+    except Exception:  # 导入失败本身就是「读不了」，不是「没绑」
         return None
-    return settings._bindings().get(env) or None
+    try:
+        return settings.bindings_state()
+    except Exception:
+        return None
+
+
+def binding_state(env: str, destination: str) -> tuple[BindingState, str]:
+    """(状态, 已绑的接口)；没有绑定时接口是 ""。"""
+    bindings = _read_bindings()
+    if bindings is None:
+        return BindingState.BINDING_UNAVAILABLE, ""
+    bound = bindings.get(env)
+    if bound is None:  # 这把 key 真的没有记录：老版本存的
+        return BindingState.LEGACY_UNBOUND, ""
+    if not isinstance(bound, str) or not bound:  # 有记录但格式不对（被改坏）：读不了，不是没有
+        return BindingState.BINDING_UNAVAILABLE, ""
+    return (BindingState.BOUND_MATCH if bound == destination else BindingState.BOUND_MISMATCH), bound
 
 
 def stored_credential(env: str, key: str, destination: str) -> Credential:
-    """存下来的 key（env 是它的槽位名）要发往 destination：绑定在别处就抛 KeyRouteError。"""
-    bound = _bound_route(env)
-    if bound and bound != destination:
-        raise KeyRouteError(f"接口已换成 {destination}，但保存的 key 是给 {bound} 填的，没有发送。"
-                            "请在设置里重新填这个接口的 key。")
+    """存下来的 key（env 是它的槽位名）要发往 destination：按 binding_state 的结局放行或抛 KeyRouteError。"""
+    state, bound = binding_state(env, destination)
+    if not SENDS[state]:
+        if state is BindingState.BOUND_MISMATCH:
+            raise KeyRouteError(f"接口已换成 {destination}，但保存的 key 是给 {bound} 填的，没有发送。"
+                                "请在设置里重新填这个接口的 key。")
+        raise KeyRouteError("读不到这把 key 绑定的接口（配置文件损坏或无法读取），没有发送。"
+                            "请在设置里重新保存这个接口的 key。")
     return Credential(key, destination)
 
 
