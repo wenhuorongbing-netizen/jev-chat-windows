@@ -116,7 +116,7 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，起草基本就是一�
 - **只截自己的聊天窗口 + 本地离线 OCR（RapidOCR）。** 不 hook、不注入、不读对方数据库、不解密、
   不碰对方进程内存。
 - **截图只在内存里。** 捕获到的帧是 numpy 数组，全程不写磁盘、不进日志、不上传；主程序（`app/`、`core/`）
-  里没有 `.save()`。`probe/`、`tools/` 下的开发脚本（人工排查、预览界面用的）会把图存成文件，但这些
+  里没有 `.save()`。`tools/` 下的开发脚本（人工排查、预览界面用的）会把图存成文件，但这些
   脚本不在发布包里，普通用户拿到的 exe 不含它们。
 - **调试视图也只在内存里画。** 那个窗口拿到的是子进程缩小后的同一份内存帧（走进程队列，不落盘），
   画完就丢，不存图、不进日志、不上传；关掉开关子进程连帧都不发。
@@ -207,8 +207,7 @@ MiniMax、Qwen 走 `/messages`，Grok、GPT 走 `/responses`，选了会失败�
 ### 为什么走 OCR
 
 目标窗口界面自绘在一块 GPU 合成画布上
-（`MMUIRenderSubWindowHW`）。UIA 树只有 2 个节点、**没有控件树**——`probe/probe_win.py`、
-`probe/probe_win2.py` 实测证伪。
+（`MMUIRenderSubWindowHW`）。UIA 树只有 2 个节点、**没有控件树**——早期探针实测证伪（探针脚本已清理，见 git 历史）。
 
 所以唯一干净的非侵入采集路 = 截自己的聊天窗口 + 本地 OCR。离线、零 token。
 
@@ -336,17 +335,6 @@ tools/
   demo.py               端到端冒烟：拿一段写死的对话跑完整链（需 key + 联网）
   preview_ui.py         用合成数据预览界面（含 --state debug 的调试视图），不采集不联网不碰聊天窗口；可 --screenshot 出图
   make_icon.py          生成 docs/icon.ico（打包图标），图标已提交，换颜色才用重跑
-probe/                  一次性探针，结论已写进本文，留着是为了可复现
-  probe_win.py          UIA 能不能读聊天文字 → 证伪（树是空的）
-  probe_win2.py         UIA 证伪 v2：分清「树是空的」和「有树没文字」，顺带试 LegacyIAccessible
-  probe_notify.py       来消息走不走 Windows 通知平台（能监听到就零 OCR）
-  probe_ocr.py          OCR 读不读得准中文气泡、左右说话人分不分得开
-  probe_ocr_speed.py    RapidOCR 一帧多久、裁小能快多少（结论：det_limit_type 必须 'max'）
-  probe_ocr_live.py     WGC 持续盯窗口 + 变了就 OCR，新文字实时打控制台
-  probe_printwindow.py  试 PrintWindow + PW_RENDERFULLCONTENT 能不能绕开 Win10 黄框（未验证）
-  probe_laya.py         Laya（开源本地决策模型）能不能替 Jev：英文题跑 multilingual / typed-decisions → 都接近随机
-  probe_laya_cn.py      同上，中文题问 multilingual → 更差
-  probe_laya_en.py      把对话人工译成英文再喂 typed-decisions → 好一点，但生气那段仍判成闲聊
 jev.spec                PyInstaller 打包定义（onedir），build.bat 和 CI 共用这一份
 build.bat               本地一键打包（双击就行）
 .github/workflows/release.yml  推 v* tag → windows-latest 上打包 → zip 挂到 Release
@@ -359,14 +347,14 @@ docs/wechat-mp.png      公众号「恸码奇点」长条横幅，README 标题�
 config.json             你自己的设置，不进仓库（在 .gitignore 里）
 ```
 
-`tools/` 和 `probe/` 里的脚本都按「项目根在 `PYTHONPATH` 里」写（PyCharm 默认会把内容根加进去）。
+`tools/` 里的脚本都按「项目根在 `PYTHONPATH` 里」写（PyCharm 默认会把内容根加进去）。
 命令行跑 `tools/demo.py` 得自己带上：`set PYTHONPATH=. && python tools/demo.py`。
 代码里没有 `sys.path` 补丁。
 
 ## 已知限制 / 路线图
 
-- **Win10 黄框**：WGC 的采集提示框，系统不给关，Win11 才行。`probe/probe_printwindow.py` 是
-  PrintWindow + `PW_RENDERFULLCONTENT` 的替代方案探针，**还没在当前版本上验证过**，能出图就能换掉 WGC。
+- **Win10 黄框**：WGC 的采集提示框，系统不给关，Win11 才行。PrintWindow + `PW_RENDERFULLCONTENT` 是
+  可能的替代方案，**没在当前版本上验证过**，能出图就能换掉 WGC。
 - **输入框拉高超过面板一半会认错消息区**：消息区靠「面板 45% 高度以下第一根分隔线」定位，
   输入框拉太高就会把它当成消息区底线。
 - **OCR 的「文字必须落在平底色上」规则只对精确像素的帧成立**：框里众数颜色占比低于 45% 就当成图片里的
