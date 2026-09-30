@@ -1,10 +1,11 @@
 {
   "contract": "fill_verdict",
   "version": 1,
-  "doc": "May a reply that was generated for `target` be written into the input box of what is on screen now (`live`)? The live side is READ FRESH right before the write, not taken from a cache. Messages are [side, text] with side 'her' or 'me'. `expect` is the shared decision; a platform-specific `expect_android` / `expect_windows` overrides it and marks a known divergence that S2 has to close (or keep on purpose). A false refusal (copy instead) is acceptable, a false fill never is.",
+  "doc": "May a reply that was generated for `target` be written into the input box of what is on screen now (`live`)? The live side is READ FRESH right before the write, not taken from a cache. Messages are [side, text] with side 'her' or 'me'. `expect` is the shared decision; a platform-specific `expect_android` / `expect_windows` overrides it and marks a divergence that is KEPT ON PURPOSE, with its platform reason in `divergence`. A false refusal (copy instead) is acceptable, a false fill never is.",
   "proof_rules": {
     "android": "the last 6 visible messages ('side:text' joined) must equal the ones at generation, and be non-empty",
-    "windows": "the newest visible message (side, text) must equal the one at generation"
+    "windows": "the newest visible message (side, text) must equal the one at generation",
+    "both": "the conversation title must be readable on both sides and equal; matching messages never stand in for an unreadable title. A candidate built from OCR proves nothing and is never filled (Android: FillGuard DENY_OCR_ONLY; Windows: WeChat is copy-only, see fill_support.json)."
   },
   "cases": [
     {
@@ -55,23 +56,19 @@
       "live": {"on_chat_screen": true, "conversation": "小王", "messages": [["her", "x"], ["me", "b"], ["her", "明天见面吗"]]},
       "expect": "deny",
       "expect_windows": "allow",
-      "divergence": "Windows compares only the newest message; Android compares the last 6."
+      "divergence": "Kept on purpose. Android re-reads a whole visible window every time, so it can compare the last 6 messages cheaply and any change in them is a refusal. Windows capture is incremental (only new messages are emitted, there is no per-snapshot window to compare), so its proof is the conversation title plus the newest message."
     },
     {
       "name": "the live title cannot be read, messages match",
       "target": {"conversation": "小王", "messages": [["her", "明天见面吗"]]},
       "live": {"on_chat_screen": true, "conversation": null, "messages": [["her", "明天见面吗"]]},
-      "expect": "deny",
-      "expect_android": "allow",
-      "divergence": "Android lets matching messages stand in for an unreadable title; Windows refuses without a readable title."
+      "expect": "deny"
     },
     {
       "name": "the candidate has no conversation title, messages match",
       "target": {"conversation": "", "messages": [["her", "明天见面吗"]]},
       "live": {"on_chat_screen": true, "conversation": "小王", "messages": [["her", "明天见面吗"]]},
-      "expect": "deny",
-      "expect_android": "allow",
-      "divergence": "Android treats a blank target title as unusable and relies on the messages; Windows refuses a candidate without a conversation."
+      "expect": "deny"
     }
   ]
 }

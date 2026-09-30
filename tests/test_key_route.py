@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 import main
+from core.convo import Coordinator
 from app import settings
 from core import jev_client
 from core.providers import JEV_ENV, LEGACY, LLM_ENV, draft_route, jev_route
@@ -99,9 +100,8 @@ class TestNothingIsSentAfterASwitch:
         monkeypatch.setattr(main, "analyze_bilingual", lambda *a, **k: sent.append((a, k)) or {})
         q = queue.Queue()
         monkeypatch.setattr(main, "results", q)
-        main.chats.clear()
-        main.chat_of("t")
-        main.analyze_bg([("her", "hi", None)], "t", 0)
+        monkeypatch.setattr(main, "coord", Coordinator())
+        main.analyze_bg(main.coord.begin("t", [("her", "hi", None)]))
         return sent, q
 
     def test_blocked_after_provider_switch(self, env, monkeypatch):

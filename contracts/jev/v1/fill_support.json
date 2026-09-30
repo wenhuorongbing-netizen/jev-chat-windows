@@ -1,16 +1,16 @@
 {
   "contract": "fill_support",
   "version": 1,
-  "doc": "Per platform and chat app: how a tapped reply reaches the input box TODAY. Statuses: fresh-verified (target re-read right before writing and matched -> auto fill), copy-only (cannot be proven -> the reply is copied, the person pastes), legacy-not-fresh-verified (still fills from a cached conversation name; must become fresh-verified or copy-only in S2, no permanent exception), unsupported (no adapter). This is a declaration checked by tests against the code, not a promise: when the code changes, this file changes in the same commit.",
-  "statuses": ["fresh-verified", "copy-only", "legacy-not-fresh-verified", "unsupported"],
+  "doc": "Per platform and chat app: how a tapped reply reaches the input box TODAY. Statuses: fresh-verified (target re-read right before writing and matched -> auto fill), copy-only (cannot be proven -> the reply is copied, the person pastes). The code is the truth and this file describes it: each platform's tests assert that what production does (Android: each adapter's fillSupport, which the fill path obeys; Windows: FILL_SUPPORT, checked against uia.PARSERS and fill_reply) equals this declaration, so when the code changes this file changes in the same commit.",
+  "statuses": ["fresh-verified", "copy-only"],
   "entries": [
-    {"platform": "android", "app": "qq", "status": "fresh-verified", "note": "tree-backed; last-6-message signature must match"},
+    {"platform": "android", "app": "qq", "status": "fresh-verified", "note": "tree-backed; last-6-message signature and readable equal titles must match"},
     {"platform": "android", "app": "whatsapp", "status": "fresh-verified", "note": "tree-backed; last-6-message signature must match"},
     {"platform": "android", "app": "x", "status": "fresh-verified", "note": "tree-backed (content-desc); signature must match"},
     {"platform": "android", "app": "feishu", "status": "copy-only", "note": "message text is not in the accessibility tree, OCR-only, no verifiable signature"},
     {"platform": "android", "app": "wechat", "status": "copy-only", "note": "nodes are obfuscated, OCR-only, no verifiable signature; product state: disabled / unverified"},
     {"platform": "windows", "app": "qq", "status": "fresh-verified", "note": "fill_uia re-reads the window twice before typing"},
     {"platform": "windows", "app": "whatsapp", "status": "fresh-verified", "note": "fill_uia re-reads the window twice before typing"},
-    {"platform": "windows", "app": "wechat", "status": "legacy-not-fresh-verified", "note": "OCR + pixel click; only checks the conversation the worker reported about 1 s ago"}
+    {"platform": "windows", "app": "wechat", "status": "copy-only", "note": "read by OCR, no conversation identity that can be re-read at fill time; the reply is copied, the person pastes"}
   ]
 }

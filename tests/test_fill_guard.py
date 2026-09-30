@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 import main
-from core.fill_guard import check_fill_target, check_fresh
+from core.convo import Coordinator
+from core.fill_guard import CopyOnly, check_fill_target, check_fresh
 
 A, B = "QQ · 小王", "QQ · 老李"
 
@@ -105,15 +106,16 @@ def wired(monkeypatch):
     """假界面 + 假 UIA 填入：记下 fill_uia 有没有被调到。"""
     typed = []
     # ov 只在 `python main.py` 的入口块里才建，import 时没有，所以 raising=False
-    monkeypatch.setattr(main, "ov", SimpleNamespace(current_chat=lambda: A, at_prefix_enabled=lambda: False),
+    monkeypatch.setattr(main, "ov", SimpleNamespace(current_chat=lambda: A),
                         raising=False)
     monkeypatch.setattr(main, "fill_uia", lambda hwnd, app, text, expect: typed.append((hwnd, app, text, expect)))
     monkeypatch.setattr(main, "fill_errors", __import__("queue").Queue())
     main.state["uia"] = {A: (1234, (10, 10))}
-    main.state["app_chat"] = {"qq": A}
-    main.chats.pop(A, None)
-    chat = main.chat_of(A)  # 候选是针对 rev=3 时最新一条生成的，之后没再动过
-    chat.update(rev=3, result_rev=3, result_last=NEWEST)
+    monkeypatch.setattr(main, "coord", Coordinator())
+    main.coord.set_open_chat("qq", A)
+    main.coord.messages(A, [("her", None, NEWEST[1])])  # 候选是针对这一条生成的，之后没再动过
+    req = main.coord.begin(A, list(main.coord.chat(A).history))
+    main.coord.finish(req, {"candidates": ["Hallo"]})
     return typed
 
 
@@ -131,19 +133,19 @@ class TestFillReply:
 
     def test_a_newer_message_since_generation_types_nothing(self, wired):
         """标题没变，但生成候选之后会话又来了新消息（rev 变了）：不填。"""
-        main.chat_of(A)["rev"] += 1
+        main.coord.messages(A, [("her", None, "在吗")])
         with pytest.raises(RuntimeError):
             main.fill_reply("Hallo")
         assert wired == []
 
     def test_candidate_without_generation_record_types_nothing(self, wired):
-        main.chat_of(A)["result_last"] = None
+        main.coord.chat(A).result_req = None
         with pytest.raises(RuntimeError):
             main.fill_reply("Hallo")
         assert wired == []
 
     def test_switch_from_A_to_B_then_tap_A_types_nothing(self, wired):
-        main.state["app_chat"]["qq"] = B
+        main.coord.set_open_chat("qq", B)
         with pytest.raises(RuntimeError):
             main.fill_reply("Hallo")
         assert wired == []
@@ -153,7 +155,7 @@ class TestFillReply:
         real_start = main.threading.Thread.start
 
         def switch_then_start(self_thread):
-            main.state["app_chat"]["qq"] = B  # 模拟排队期间用户切走
+            main.coord.set_open_chat("qq", B)  # 模拟排队期间用户切走
             real_start(self_thread)
 
         monkeypatch.setattr(main.threading.Thread, "start", switch_then_start)
@@ -163,7 +165,20 @@ class TestFillReply:
         assert not main.fill_errors.empty()
 
     def test_app_never_reported_a_conversation_types_nothing(self, wired):
-        main.state["app_chat"] = {}
+        main.coord.forget_open_chats()
         with pytest.raises(RuntimeError):
+            main.fill_reply("Hallo")
+        assert wired == []
+
+
+class TestWeChatIsCopyOnly:
+    """微信是 OCR 读的，没有能现读现对的会话标识：点「填入」不碰任何输入框，只让界面去复制。"""
+
+    def test_wechat_fill_raises_copy_only_and_types_nothing(self, wired, monkeypatch):
+        W = "小王"  # 微信会话名没有前缀
+        monkeypatch.setattr(main, "ov", SimpleNamespace(current_chat=lambda: W),
+                            raising=False)
+        main.state["uia"][W] = (1234, (10, 10))  # 就算有人误给了输入框位置也不能填
+        with pytest.raises(CopyOnly):
             main.fill_reply("Hallo")
         assert wired == []

@@ -35,6 +35,7 @@ from app.theme import (ACCENT, ACCENT_HOVER, ACCENT_PRESS, ACCENT_SOFT, AUX, BOD
                        SURFACE, TINY, TITLE, WARN, WECHAT, WHATSAPP)
 from app.version import VERSION
 from core import jev_client, keygate, llm, providers
+from core.fill_guard import CopyOnly
 from core.questions import CHOICE_LABELS
 
 _LOG_LINES = 300
@@ -826,10 +827,6 @@ class Overlay:
         self.targetBox.setToolTip("三条候选都按这个人来写；不选就跟着最近说话的那位")
         self.targetBox.currentIndexChanged.connect(self._on_target_selected)
         target_row.addWidget(self.targetBox, 1)
-        self.atCheck = CheckBox("带 @")
-        self.atCheck.setChecked(True)
-        self.atCheck.setToolTip("填入时在开头加「@名字 」。只是普通文字，不会变成真正的 @")
-        target_row.addWidget(self.atCheck)
         self.targetRow.hide()
         body.addWidget(self.targetRow)
 
@@ -1514,6 +1511,9 @@ class Overlay:
             return
         try:
             self.on_fill(self.cands[index])
+        except CopyOnly:  # 这个 App 只复制不自动填：回复放进剪贴板，人自己粘贴
+            self._copy(index)
+            return
         except Exception as e:
             # 状态栏保持友好文案；真实原因和压缩堆栈进聊天记录，认得出是哪一步炸的
             import traceback
@@ -1968,10 +1968,6 @@ class Overlay:
         self.set_status(f"按「{name}」重新生成…", "busy")
         if self.on_target_change:
             self.on_target_change(self._shown, name)
-
-    def at_prefix_enabled(self):
-        """填入时要不要带「@名字 」前缀（只记在界面上，不落盘）。"""
-        return self.atCheck.isChecked()
 
     def _follow_text(self):
         """「浏览中」才显示这小字，跟随时这一格直接藏起来（去噪）。"""

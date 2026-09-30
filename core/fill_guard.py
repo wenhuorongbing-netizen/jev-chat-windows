@@ -7,6 +7,10 @@
 from __future__ import annotations
 
 
+class CopyOnly(RuntimeError):
+    """这个 App 的候选只能复制、不能自动填（没有能现读现对的会话标识）：界面把回复放进剪贴板，由人粘贴。"""
+
+
 def check_fill_target(chat: str, open_chat: str | None) -> str | None:
     """chat = 候选所属的会话；open_chat = 该 App 最近一次报上来的当前会话（None = 没报过）。
     可以填返回 None，不可以返回一句给人看的原因（不含聊天内容）。"""
@@ -39,9 +43,9 @@ def check_fresh(chat: str, newest: tuple | None, fresh_chat: str | None,
 
 # 今天各 App 怎么填（契约 contracts/jev/v1/fill_support.json 的 Windows 一半；测试拿它对 app/uia.PARSERS 和契约文件）：
 #   fresh-verified = 打字前重读窗口并比对通过才填；
-#   legacy-not-fresh-verified = 还按一秒前 worker 报的会话名填，S2 必须改成 fresh-verified 或 copy-only，不设永久例外。
+#   copy-only = 没有能现读现对的会话标识，只复制、由人粘贴（main.fill_reply 抛 CopyOnly）。
 FILL_SUPPORT = {
     "qq": "fresh-verified",
     "whatsapp": "fresh-verified",
-    "wechat": "legacy-not-fresh-verified",
+    "wechat": "copy-only",
 }

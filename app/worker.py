@@ -68,7 +68,6 @@ def run(q, hwnd, enabled, debug_on):
     img_seen = {}  # {会话名: {图片 ahash}}，封顶 200
     img_seeded = set()  # 已播过种的会话：首帧只记 hash 不上报，避免历史图刷屏
     title, head = "", None  # 当前会话名 / 上一帧的头部像素
-    last_area = None  # 上次发给父进程的 4 元组，变了才再发一次
     warned = False  # 消息区识别失败是否已经报过，拖窗口时别每帧刷一条
     import multiprocessing
 
@@ -110,9 +109,6 @@ def run(q, hwnd, enabled, debug_on):
                     cap.area = area  # 采集线程拿它做 diff
                     x0, y0, x1, y1, bg, y_pane = area
                     rect = (x0, y0, x1, y1)
-                    if rect != last_area:
-                        q.put(("area", rect))
-                        last_area = rect
                     crop = full[y_pane:y0, x0:x1]  # 头部：会话名在这里
                     if head is None or not np.array_equal(crop, head):  # 名字没动就别白跑一次 OCR
                         head = crop
