@@ -1149,8 +1149,8 @@ class Overlay:
         images_row.addWidget(self.imagesSwitch)
         box.addLayout(images_row)
         box.addWidget(self._hint(
-            "对方最新发的是图片时，把这张图（QQ 优先用原图，否则截窗口里那块）缩小后一起发给起草模型看。"
-            "只发最新一张，不存盘。关掉则图片只算「[图片]」。"
+            "默认关。打开后，只有对方的最新一条本身是图片时，才截窗口里那块缩小后发给起草模型看；"
+            "不读任何本地文件，不存盘。关着则图片只算「[图片]」。"
         ))
         update_row = QHBoxLayout()
         update_row.addWidget(_label("启动时检查更新", AUX), 1)
@@ -1241,8 +1241,10 @@ class Overlay:
         """一组「来源 / 密钥 / 模型」控件，判断和起草各一份。table 是 core/providers.py 里那张表。"""
         group = SimpleNamespace(kind=kind, table=table, ids=list(table),
                                 keyTitle="判断" if kind == "jev" else "起草",
-                                stored_key=lambda k=kind: (settings.jev_key() if k == "jev"
-                                                           else settings.llm_key()))
+                                # 存的 key 只算给「界面上现在选的这个接口」用的：绑定在别的接口上就当没配，
+                                # 「获取模型」也就不会把它发给刚选的新来源
+                                stored_key=lambda k=kind: settings.key_for_route(
+                                    providers.JEV_ENV if k == "jev" else providers.LLM_ENV, self._route_of(k)))
         heading = QHBoxLayout()
         heading.addWidget(_label(title, BODY, INK, True), 1)
         group.keyState = _label("", AUX, ACCENT)
@@ -1297,6 +1299,12 @@ class Overlay:
     @staticmethod
     def _provider_of(group):
         return group.ids[max(0, group.providerBox.currentIndex())]
+
+    def _route_of(self, kind):
+        """界面上现在选的接口会把 key 发往哪里（跟 settings 里绑定的同一种 origin 口径）。"""
+        if kind == "jev":
+            return providers.jev_route(self._provider_of(self.jev))
+        return providers.draft_route(self._provider_of(self.draft), self.baseEdit.text().strip())
 
     def _provider_changed(self, group):
         """换来源：模型框回到这家该有的值（存的就是这家才用存的，否则用它的默认），状态清掉。"""

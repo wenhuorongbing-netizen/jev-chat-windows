@@ -12,7 +12,8 @@ import json
 import os
 import sys  # 只为下面这一处：打包后 __file__ 指向临时解包目录，config.json 得放在 exe 旁边才存得住
 
-from core.providers import CUSTOM, DRAFT_PROVIDERS, JEV_ENV, JEV_PROVIDERS, LEGACY, LLM_ENV
+from core.providers import (CUSTOM, DRAFT_PROVIDERS, JEV_ENV, JEV_PROVIDERS, LEGACY, LLM_ENV,
+                            draft_route, jev_route)
 
 _ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
          else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -152,8 +153,10 @@ def bilingual_lang() -> str:
     return str(_read("bilingual_lang") or "德语")
 
 def read_images() -> bool:
-    """对方最新发来的是图片时，截图/取原图一起发给起草模型看。默认开；关了图片只算「[图片]」三个字。"""
-    return bool(_read("read_images", True))
+    """对方最新发来的是图片时，把窗口里那张图截下来一起发给起草模型看。默认关，必须用户主动开；
+    关了图片只算「[图片]」三个字。存的键是 read_images_optin：老版本的 read_images（当年默认 True）
+    不算授权，升级后要在设置里重新打开一次。"""
+    return bool(_read("read_images_optin", False))
 
 def show_gloss() -> bool:
     """回复卡上显示中文意思（双语时的灰字对照）：默认开；关了只影响显示，不影响填入和缓存。"""
@@ -275,6 +278,31 @@ def llm_key() -> str:
 def has_llm_key() -> bool:
     return bool(llm_key())
 
+class KeyRouteError(RuntimeError):
+    """key 是为别的接口填的：没发出去，也不含 key 本身。"""
+
+
+def _bindings() -> dict:
+    """{环境变量名: 这把 key 是为哪个接口 origin 填的}。只记接口地址，不含 key 的任何部分。"""
+    v = _read("key_bindings", {})
+    return dict(v) if isinstance(v, dict) else {}
+
+def _current_route(env_name: str, jev_provider_now: str | None = None) -> str:
+    return jev_route(jev_provider_now or jev_provider()) if env_name == JEV_ENV else draft_route(draft_provider(), draft_base_url())
+
+def key_for_route(env_name: str, route: str) -> str:
+    """存的 key，但只在它绑定的就是 [route]（或从没绑过）时才给；绑在别的接口上就当没配，返回空。"""
+    bound = _bindings().get(env_name)
+    return "" if bound and bound != route else _get_key(env_name)
+
+def require_key_route(env_name: str) -> None:
+    """发请求前调：这把 key 绑定的接口跟现在要发往的接口不一致就抛 KeyRouteError，一个字节都不发。
+    没有绑定记录（老版本存的 key）视为还没换过来源：save() 换来源前会先把它绑到旧接口上。"""
+    bound = _bindings().get(env_name)
+    now = _current_route(env_name)
+    if bound and bound != now:
+        raise KeyRouteError(f"接口已换成 {now}，但保存的 key 是给 {bound} 填的，没有发送。请在设置里重新填这个接口的 key。")
+
 def has_key() -> bool:
     """界面上「配没配好」：双语模式只要起草那把，普通模式要判断那把。"""
     return has_llm_key() if bilingual() else has_jev_key()
@@ -292,6 +320,17 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
     """每个参数为空/None = 保留当前值。两把 key 写进程环境 + HKCU\\Environment，不写任何文件。"""
     jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
     draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
+    # key 跟接口绑定：这次填的 key 绑到这次保存的接口；没重填的老 key 若还没绑过，先绑到「保存前」的接口，
+    # 这样下面换了来源/Base URL 之后旧 key 就发不出去，要重填（require_key_route）
+    new_base = str(_read("draft_base_url") or "") if draft_base_url_text is None else str(draft_base_url_text).strip()
+    bindings = _bindings()
+    for env, typed, old_route, new_route in (
+            (JEV_ENV, jev_key_text, _current_route(JEV_ENV), jev_route(jev)),
+            (LLM_ENV, llm_key_text, _current_route(LLM_ENV), draft_route(draft, new_base))):
+        if typed:
+            bindings[env] = new_route
+        elif env not in bindings and _get_key(env):
+            bindings[env] = old_route
     # 没重填就把老变量里的值抄进新名字，迁移一次性做完（_get_key 已经退回读过老的了）
     wrote_key = False
     for env, typed in ((JEV_ENV, jev_key_text), (LLM_ENV, llm_key_text)):
@@ -324,9 +363,10 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
         "chat_meta": _read("chat_meta", {}),  # 每个会话的 ts/静音，由 set_chat_meta 管，这里原样留着
         "bilingual": flag(bilingual_on, bilingual),
         "dock": flag(dock_on, dock),
-        "read_images": flag(read_images_on, read_images),
+        "read_images_optin": flag(read_images_on, read_images),
         "show_gloss": flag(show_gloss_on, show_gloss),
         "bilingual_lang": keep(bilingual_lang_text, "bilingual_lang"),
+        "key_bindings": bindings,  # key → 接口 origin 的对应，不含 key 本身
     }
     with open(_CONFIG, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)

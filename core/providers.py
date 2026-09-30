@@ -67,6 +67,36 @@ DRAFT_PROVIDERS = {  # 第一个就是默认：DeepSeek 官网直连
 
 # 这两个来源没有固定地址，设置页要多露一行 Base URL 出来
 CUSTOM = ("custom_openai", "custom_anthropic")
+
+
+def _origin(url: str) -> str:
+    """scheme://host[:port]，小写，默认端口省掉；不是合法地址返回空。路径、大小写、结尾斜杠都不算。"""
+    from urllib.parse import urlsplit
+
+    try:
+        p = urlsplit((url or "").strip())
+        host, port = p.hostname, p.port
+    except ValueError:
+        return ""
+    if not p.scheme or not host:
+        return ""
+    default = {"https": 443, "http": 80}.get(p.scheme.lower())
+    tail = f":{port}" if port not in (None, default) else ""
+    return f"{p.scheme.lower()}://{host.lower()}{tail}"
+
+
+def draft_route(provider: str, base_url: str = "") -> str:
+    """起草那把 key 现在会被发往哪里：来源地址的 origin；没有固定地址的来源（Gemini）用来源名。
+    key 只跟这个值绑定，换来源/换 Base URL 让它变了，旧 key 就不能再发。"""
+    spec = DRAFT_PROVIDERS.get(provider)
+    base = base_url if provider in CUSTOM else (spec.base if spec else "")
+    return _origin(base) or f"provider:{provider}"
+
+
+def jev_route(provider: str) -> str:
+    """判断那把 key 的去向；两家判断来源的地址是固定的。"""
+    return _origin({"openrouter": OPENROUTER_BASE, "typesafe": TYPESAFE_BASE}.get(provider, "")) or f"provider:{provider}"
+
 # 起草时认思考开关的来源，设置页那句提示照着这里写
 THINKING = ("DeepSeek", "OpenRouter", "Anthropic", "Gemini")
 # 所有可能存 key 的环境变量（新两把 + 两个老名字），脱敏时一次全过一遍（jev_client.redact_secrets）

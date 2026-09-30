@@ -1,22 +1,15 @@
 # -*- coding: utf-8 -*-
 """对方最新发来的图片 → 缩好的 JPEG（base64），喂给能看图的起草模型。全程只在内存里，不落盘。
 
-两条路：
-- QQ 原图：QQ NT 把收到的图按月存成普通文件（Tencent Files\\<号>\\nt_qq\\nt_data\\Pic\\YYYY-MM\\Ori|Thumb）。
-  UI 自动化不告诉我们是哪个文件，只能按时间对：消息出现前后十几秒里只新写了一个文件，才认它；
-  拿不准（好几个群同时来图）就不用，走下一条。
-- 窗口截图：PrintWindow 截聊天窗口（被别的窗口挡着也截得到），按 UI 自动化给的图片位置裁出来。
-  微信 4.x 的图是加密的 .dat、WhatsApp 的图在 WebView2 的加密缓存里，这两家只能走这条。
+唯一来源：窗口截图。PrintWindow 截聊天窗口（被别的窗口挡着也截得到），按 UI 自动化给的图片位置裁出来。
+不读任何 App 的本地文件——QQ 的图片目录曾按修改时间猜「是哪张」，对不准还越过了「只看这次截图」的边界，已删。
 """
 from __future__ import annotations
 
 import base64
 import ctypes
 import ctypes.wintypes as w
-import glob
 import io
-import os
-import time
 
 _MAX_SIDE = 1024  # DeepSeek 一张图最多按 1024 token 算，再大也是白传
 
@@ -39,26 +32,6 @@ def _encode(img) -> str:
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def qq_file_since(since: float, window: float = 20.0) -> str | None:
-    """QQ 图片目录里 [since-window, now] 之间新写的文件：原图唯一就用原图，否则缩略图唯一就用缩略图。"""
-    from PIL import Image
-
-    month = time.strftime("%Y-%m")
-    home = os.path.join(os.path.expanduser("~"), "Documents", "Tencent Files")
-    for sub in ("Ori", "Thumb"):
-        fresh = [p for p in glob.glob(os.path.join(home, "*", "nt_qq", "nt_data", "Pic", month, sub, "*"))
-                 if os.path.getmtime(p) >= since - window]
-        if len(fresh) == 1:
-            try:
-                with Image.open(fresh[0]) as img:
-                    return _encode(img)
-            except Exception:
-                return None
-        if len(fresh) > 1:
-            return None  # 同一时间好几张，对不准是哪张，宁可不用
-    return None
 
 
 def crop_window(hwnd: int, rect: tuple) -> str | None:

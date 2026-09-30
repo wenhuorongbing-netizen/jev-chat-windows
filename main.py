@@ -20,6 +20,9 @@ from app.overlay import Overlay
 from app.qol import auto_generate_allowed, run_with_retry
 from app.version import VERSION
 from core.engine import analyze, analyze_bilingual, reroll_candidate
+from core.fill_guard import check_fill_target
+from core.image_policy import newest_image
+from core.providers import JEV_ENV, LLM_ENV
 
 # {会话名: {history, result, rev, target, senders}}：每个会话各自的上下文、上次结果和版本号，互不串味
 # history 里是 [(who, text, name)]，engine 只认 her/me，name 是群里的发言人（单聊/自己说的是 None）；
@@ -103,13 +106,22 @@ def target_of(title):
     return chat["senders"][0] if chat["senders"] else None
 
 
+def _refuse_off_target(title):
+    """候选属于 title；那个 App 的窗口现在开着的不是它就抛错（界面提示复制），一个字都不打。"""
+    why = check_fill_target(title, state["app_chat"].get(app_of(title)))
+    if why:
+        raise RuntimeError(why)
+
+
 def fill_reply(text):
-    title = ov.current_chat()
+    title = ov.current_chat()  # 点的那张卡属于这个会话；后面全按它核验，不再回头读界面
+    _refuse_off_target(title)
     uia = state["uia"].get(title)
     if uia:  # QQ / WhatsApp：UI 自动化把焦点给输入框再打字。放后台线程：面板是聊天窗口的从属窗口，
         # 在界面线程里查它的 UI 自动化树会绕回自己的界面线程，容易卡死
         def run():
             try:
+                _refuse_off_target(title)  # 线程排队/起来这段时间里用户可能又切了会话，打字前再核一次
                 fill_uia(uia[0], app_of(title), text)
             except Exception as e:
                 fill_errors.put(f"{type(e).__name__}: {e}")
@@ -176,15 +188,11 @@ def on_toggle_capture(on):
 
 
 def latest_image(title, msgs):
-    """对方最后连着说的那几条里要是有图，返回它；更早的图不带（跟当前回复多半没关系，还费钱）。"""
-    pic = chat_of(title).get("image")
-    if not pic or not msgs:
+    """只有「对方最新一条本身就是图」且用户开了识别图片才带图；更早的图不带（口径见 core/image_policy）。"""
+    chat = chat_of(title)
+    if len(msgs) != len(chat["history"]):  # 请求用的不是这个会话的最新状态，图对不上
         return None
-    start = len(msgs)
-    while start > 0 and msgs[start - 1][0] == "her":
-        start -= 1
-    at, data = pic
-    return data if start < at <= len(msgs) and len(msgs) == len(chat_of(title)["history"]) else None
+    return newest_image(chat.get("image"), msgs, settings.read_images())
 
 
 def analyze_bg(msgs, title, revision, reply_to=None):
@@ -213,6 +221,13 @@ def analyze_bg(msgs, title, revision, reply_to=None):
                        jev_provider=settings.jev_provider(),
                        jev_model=settings.jev_model() or None)
 
+    try:  # key 是为别的接口填的就一个字节都不发，也不重试（换来源/Base URL 之后必须重填）
+        if not settings.bilingual():
+            settings.require_key_route(JEV_ENV)
+        settings.require_key_route(LLM_ENV)
+    except settings.KeyRouteError as e:
+        results.put(("err", f"分析失败: {e}", title, revision))
+        return
     ok, value, _attempts = run_with_retry(_run, lambda: revision == chat_of(title)["rev"], 1.5)
     if not ok:
         results.put(("err", f"分析失败: {value}", title, revision))
@@ -249,6 +264,7 @@ def _reroll_bg(title, index, msgs, result, rev):
     """后台线程跑网络；UI 只在 tick 里动。关系/图片口径跟正常生成一样（relationship_for / latest_image）。"""
     group = len({m[2] for m in msgs if m[0] == "her" and len(m) > 2 and m[2]}) >= 2
     try:
+        settings.require_key_route(LLM_ENV)
         text, gloss = reroll_candidate(msgs, settings.relationship_for(title, group),
                                        result.get("lang") or "中文",
                                        list(result.get("candidates") or []),

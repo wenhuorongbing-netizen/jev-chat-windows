@@ -11,14 +11,15 @@ from app.uia import APPS, PARSERS, Dedup, _Tree, find_windows
 
 
 def _with_image(app, hwnd, msg, first):
-    """最新一条是对方发的图：换成 (who, name, text, base64 JPEG)；抓不到/没开/第一次读会话就是 None。"""
+    """最新一条是对方发的图：换成 (who, name, text, base64 JPEG)；抓不到/没开/第一次读会话就是 None。
+    图只来自这次窗口截图（用户明确开了识别图片才截），不读任何 App 的本地文件。"""
     who, nm, text, pic = msg
     img = None
     if who == "her" and pic and not first and settings.read_images():
         try:
-            from app.images import crop_window, qq_file_since
+            from app.images import crop_window
 
-            img = (qq_file_since(time.time()) if app == "qq" else None) or crop_window(hwnd, pic)
+            img = crop_window(hwnd, pic)
         except Exception:
             img = None  # 看不了图就当普通「[图片]」，别耽误出候选
     return (who, nm, text, img)
