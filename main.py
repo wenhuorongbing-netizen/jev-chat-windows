@@ -113,16 +113,27 @@ def _refuse_off_target(title):
         raise RuntimeError(why)
 
 
+def _generation_state(title):
+    """候选生成时的 (会话名, 最新一条 (谁, 正文))；这个会话之后又有过新消息（候选过期）就抛错。"""
+    chat = chat_of(title)
+    newest = chat.get("result_last")
+    if not newest or chat.get("result_rev") != chat["rev"]:
+        raise RuntimeError("会话里有新消息，候选可能过期，没有填入")
+    return title, newest
+
+
 def fill_reply(text):
     title = ov.current_chat()  # 点的那张卡属于这个会话；后面全按它核验，不再回头读界面
     _refuse_off_target(title)
     uia = state["uia"].get(title)
     if uia:  # QQ / WhatsApp：UI 自动化把焦点给输入框再打字。放后台线程：面板是聊天窗口的从属窗口，
         # 在界面线程里查它的 UI 自动化树会绕回自己的界面线程，容易卡死
+        expect = _generation_state(title)  # 点击这一刻的状态；fill_uia 里还会现读窗口再对一遍
+
         def run():
             try:
                 _refuse_off_target(title)  # 线程排队/起来这段时间里用户可能又切了会话，打字前再核一次
-                fill_uia(uia[0], app_of(title), text)
+                fill_uia(uia[0], app_of(title), text, expect)
             except Exception as e:
                 fill_errors.put(f"{type(e).__name__}: {e}")
         threading.Thread(target=run, daemon=True).start()
@@ -439,7 +450,11 @@ def tick():
                 ov.set_busy(False)
                 continue
             if kind == "ok":
-                chat_of(title)["result"] = r  # 先存着；正看着这个会话才立刻贴上去
+                chat = chat_of(title)
+                chat["result"] = r  # 先存着；正看着这个会话才立刻贴上去
+                chat["result_rev"] = revision  # 填入时核对：这份候选生成之后会话有没有再动过
+                last = chat["history"][-1] if chat["history"] else None
+                chat["result_last"] = (last[0], last[1]) if last else None  # 生成时最新一条 (谁, 正文)
                 if title == ov.current_chat():
                     ov.show(r)
                 else:

@@ -12,6 +12,7 @@ import json
 import os
 import sys  # 只为下面这一处：打包后 __file__ 指向临时解包目录，config.json 得放在 exe 旁边才存得住
 
+from core.keygate import KeyRouteError  # noqa: F401 —— 老名字：main / 测试从 settings 上取
 from core.providers import (CUSTOM, DRAFT_PROVIDERS, JEV_ENV, JEV_PROVIDERS, LEGACY, LLM_ENV,
                             draft_route, jev_route)
 
@@ -278,10 +279,6 @@ def llm_key() -> str:
 def has_llm_key() -> bool:
     return bool(llm_key())
 
-class KeyRouteError(RuntimeError):
-    """key 是为别的接口填的：没发出去，也不含 key 本身。"""
-
-
 def _bindings() -> dict:
     """{环境变量名: 这把 key 是为哪个接口 origin 填的}。只记接口地址，不含 key 的任何部分。"""
     v = _read("key_bindings", {})
@@ -296,7 +293,8 @@ def key_for_route(env_name: str, route: str) -> str:
     return "" if bound and bound != route else _get_key(env_name)
 
 def require_key_route(env_name: str) -> None:
-    """发请求前调：这把 key 绑定的接口跟现在要发往的接口不一致就抛 KeyRouteError，一个字节都不发。
+    """界面层的快速失败（不重试、给一句人话）：这把 key 绑定的接口跟现在选的接口不一致就抛 KeyRouteError。
+    真正的边界在网络出口（core/keygate：llm / jev_client 只收 Credential），这里不是唯一一道。
     没有绑定记录（老版本存的 key）视为还没换过来源：save() 换来源前会先把它绑到旧接口上。"""
     bound = _bindings().get(env_name)
     now = _current_route(env_name)

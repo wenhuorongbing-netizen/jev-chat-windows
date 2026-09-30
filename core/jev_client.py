@@ -17,9 +17,11 @@ import urllib.request
 from typing import NoReturn
 
 try:  # 当模块导入 / 当脚本直接跑 都能用
+    from .keygate import Credential, destination_of, release, stored_credential
     from .providers import (ENV_VARS, JEV_ENV, JEV_PROVIDERS, LEGACY,
                             OPENROUTER_DECISIONS, OPENROUTER_KEY_URL, TYPESAFE_BASE)
 except ImportError:
+    from keygate import Credential, destination_of, release, stored_credential
     from providers import (ENV_VARS, JEV_ENV, JEV_PROVIDERS, LEGACY,
                            OPENROUTER_DECISIONS, OPENROUTER_KEY_URL, TYPESAFE_BASE)
 
@@ -53,16 +55,28 @@ def _status_of(exc: Exception) -> int | None:
     return None
 
 
+_STATUS_HINT = {401: "密钥被拒", 403: "没有权限", 404: "模型或地址不对", 400: "请求被拒", 422: "请求被拒",
+                402: "余额或额度不足", 429: "被限流", 529: "服务过载"}
+
+
+def hint_for(status: int | None) -> str:
+    """一个 HTTP 状态码对应的、我们自己写的提示。绝不引用服务端返回的任何文字。"""
+    if status in _STATUS_HINT:
+        return _STATUS_HINT[status]
+    if status is not None and 500 <= status <= 599:
+        return "服务端出错，请稍后再试"
+    return "请求没有成功"
+
+
 def _fail(exc: Exception, what: str) -> NoReturn:
-    """SDK 抛的异常 → 一句人话的 JevError。消息过脱敏，绝不把 key 带出来。"""
+    """SDK 抛的异常 → 一句人话的 JevError。只留 状态码 + 固定提示：SDK 异常的文字里带着服务端的响应体，
+    第三方可能把 key、提示词或聊天片段回显在里面，所以整段不用，也就不需要靠脱敏去赌。"""
     if isinstance(exc, JevError):
         raise exc
     status = _status_of(exc)
-    hint = {401: "密钥被拒", 403: "没有权限", 404: "模型或地址不对", 422: "请求被拒",
-            429: "被限流", 529: "服务过载"}.get(status, "")
-    detail = redact_secrets(str(exc)).strip()[:300]
-    head = f"{what} HTTP {status}" if status else f"{what}失败"
-    raise JevError(f"{head}: {hint or detail or type(exc).__name__}", status) from None
+    if status:
+        raise JevError(f"{what} HTTP {status}: {hint_for(status)}", status) from None
+    raise JevError(f"{what}失败: {type(exc).__name__}", None) from None
 
 
 def _api_key(env: str = JEV_ENV) -> str:
@@ -77,12 +91,20 @@ def _api_key(env: str = JEV_ENV) -> str:
     return key
 
 
-def _error_body(exc: urllib.error.HTTPError) -> str:
-    try:
-        raw = exc.read().decode("utf-8", errors="replace")
-    except Exception:
-        raw = ""
-    return redact_secrets(raw)[:800]
+def credential_for(env: str, destination: str) -> Credential:
+    """存下来的那把 key（env 槽位）+ 它这次要发往的接口，合成一个不可变的 Credential。
+    绑定在别的接口上就抛 KeyRouteError。key 没配抛 JevError。"""
+    return stored_credential(env, _api_key(env), destination)
+
+
+def jev_destination(provider: str) -> str:
+    """判断这家来源会把 key 送到的接口（origin）；OpenRouter 的判断和 key 探测在同一个 origin。"""
+    return destination_of(provider, TYPESAFE_BASE if provider == "typesafe" else OPENROUTER_DECISIONS)
+
+
+def _net_reason(exc: urllib.error.URLError) -> str:
+    """连接层失败只报类型，不引用异常里的文字。"""
+    return type(getattr(exc, "reason", exc)).__name__
 
 
 def ask(state: dict, questions: dict, timeout: float = 20,
@@ -93,11 +115,11 @@ def ask(state: dict, questions: dict, timeout: float = 20,
     两条路返回的 dict 形状一模一样，429/529 都会退避重试。绝不打印或写出 key。
     """
     spec = JEV_PROVIDERS.get(provider) or JEV_PROVIDERS["openrouter"]
-    key = _api_key(JEV_ENV)  # 两家共用同一把 key，换来源不用重填
     model = model or spec.default
+    cred = credential_for(JEV_ENV, jev_destination(provider))
     if provider == "typesafe":
-        return _ask_typesafe(state, questions, key, model, timeout)
-    return _ask_openrouter(state, questions, key, model, timeout)
+        return _ask_typesafe(state, questions, cred, model, timeout)
+    return _ask_openrouter(state, questions, cred, model, timeout)
 
 
 def _answer(answer) -> dict:
@@ -112,12 +134,13 @@ def _answer(answer) -> dict:
             "probabilities": {str(k): v for k, v in answer.probabilities.items()}}
 
 
-def _ask_typesafe(state: dict, questions: dict, key: str, model: str, timeout: float) -> dict:
+def _ask_typesafe(state: dict, questions: dict, cred: Credential, model: str, timeout: float) -> dict:
     """官方 typesafe_sdk。questions 原样传：core/questions.py 里那几个 dict 本身就是 SDK 的
     NoulModel / ChoiceModel / ScoreModel（SDK 的 normalize_questions 认 dict），不用再包一层对象。
     重试用 RetryPolicy 的默认值——它本来就重试 408/429/5xx（含 529）并退避。"""
     import typesafe_sdk
 
+    key = release(cred, destination_of("typesafe", TYPESAFE_BASE))
     try:
         with typesafe_sdk.TypeSafeClient(api_key=key, base_url=TYPESAFE_BASE, model=model,
                                          timeout=timeout) as client:
@@ -131,15 +154,15 @@ def _ask_typesafe(state: dict, questions: dict, key: str, model: str, timeout: f
     }
 
 
-def _ask_openrouter(state: dict, questions: dict, key: str, model: str, timeout: float) -> dict:
+def _ask_openrouter(state: dict, questions: dict, cred: Credential, model: str, timeout: float) -> dict:
     """OpenRouter 的 /api/alpha/decisions，手写 urllib。429/529 退避重试 3 次。"""
     payload = json.dumps(
         {"model": model, "state": state, "questions": questions},
         ensure_ascii=False,
     ).encode("utf-8")
 
+    key = release(cred, destination_of("openrouter", OPENROUTER_DECISIONS))
     last_status: int | None = None
-    last_body = ""
     for attempt in range(MAX_RETRIES + 1):
         req = urllib.request.Request(
             OPENROUTER_DECISIONS,
@@ -156,58 +179,49 @@ def _ask_openrouter(state: dict, questions: dict, key: str, model: str, timeout:
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw)
         except urllib.error.HTTPError as exc:
-            last_status = exc.code
-            last_body = _error_body(exc)
+            last_status = exc.code  # 响应体不读：只用状态码 + 我们自己的提示
             if last_status in (429, 529) and attempt < MAX_RETRIES:
                 time.sleep(2**attempt)
                 continue
-            readable = {
-                401: f"Jev HTTP 401: API key rejected. Check {JEV_ENV}.",
-                422: f"Jev HTTP 422: request body rejected. {last_body}",
-                429: f"Jev HTTP 429: rate limited after {MAX_RETRIES} retries. {last_body}",
-                529: f"Jev HTTP 529: provider overloaded after {MAX_RETRIES} retries. {last_body}",
-            }.get(last_status, f"Jev HTTP {last_status}: {last_body}")
-            raise JevError(readable, last_status) from None
+            raise JevError(f"Jev HTTP {last_status}: {hint_for(last_status)}", last_status) from None
         except (TimeoutError, socket.timeout) as exc:
             if attempt < MAX_RETRIES:
                 time.sleep(2**attempt)
                 continue
             raise JevError(f"Jev request timed out after {timeout}s") from exc
         except urllib.error.URLError as exc:
-            reason = redact_secrets(getattr(exc, "reason", exc))
             if attempt < MAX_RETRIES:
                 time.sleep(2**attempt)
                 continue
-            raise JevError(f"Jev request failed: {reason}") from None
+            raise JevError(f"Jev request failed: {_net_reason(exc)}") from None
 
-    raise JevError(
-        f"Jev HTTP {last_status}: exhausted retries. {last_body}", last_status
-    )
+    raise JevError(f"Jev HTTP {last_status}: exhausted retries", last_status)
 
 
-def _check_openrouter_key(key: str, timeout: float) -> None:
+def _check_openrouter_key(cred: Credential, timeout: float) -> None:
     """免费的 auth/key 探测：401/403 说明 key 不对，别的错（超时/断网）也如实上报。
     列表本身是写死的，key 对不对只有靠它才知道，别等第一次判断才暴露。"""
+    key = release(cred, destination_of("openrouter", OPENROUTER_KEY_URL))
     req = urllib.request.Request(OPENROUTER_KEY_URL,
                                  headers={"Authorization": f"Bearer {key}"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp.read()
     except urllib.error.HTTPError as exc:
-        hint = {401: "密钥被拒", 403: "没有权限"}.get(exc.code, _error_body(exc)[:200])
-        raise JevError(f"取模型列表 HTTP {exc.code}: {hint}") from None
+        raise JevError(f"取模型列表 HTTP {exc.code}: {hint_for(exc.code)}") from None
     except (TimeoutError, socket.timeout):
         raise JevError(f"取模型列表请求超时（{timeout}s）") from None
     except urllib.error.URLError as exc:
-        raise JevError(
-            f"取模型列表失败: {redact_secrets(getattr(exc, 'reason', exc))}") from None
+        raise JevError(f"取模型列表失败: {_net_reason(exc)}") from None
 
 
-def list_models(provider: str, key: str, timeout: float = 10) -> list[str]:
-    """某家能用的 Jev 模型 id，去重排序。失败抛 JevError（设置页直接显示这句话）。"""
+def list_models(provider: str, key: Credential, timeout: float = 10) -> list[str]:
+    """某家能用的 Jev 模型 id，去重排序。失败抛 JevError（设置页直接显示这句话）。
+    key 必须是接口对得上这家来源的 Credential（core/keygate）。"""
     if provider == "typesafe":
         import typesafe_sdk
 
+        key = release(key, destination_of("typesafe", TYPESAFE_BASE))
         try:
             with typesafe_sdk.TypeSafeClient(api_key=key, base_url=TYPESAFE_BASE,
                                              timeout=timeout) as client:
@@ -234,6 +248,11 @@ if __name__ == "__main__":
         from .questions import JUDGE_QUESTIONS, build_rank_question
     except ImportError:
         from questions import JUDGE_QUESTIONS, build_rank_question
+
+    # 裸 key 包成「发往自己那个地址」的 Credential；接口对不上会被拒，见 tests/test_keygate.py
+    _lm = list_models
+    list_models = lambda p, k: _lm(p, Credential(  # noqa: E731
+        k, destination_of(p, TYPESAFE_BASE if p == "typesafe" else OPENROUTER_KEY_URL)))
 
     os.environ.pop(JEV_ENV, None)
     os.environ["OPENROUTER_API_KEY"] = "or-key"  # 老名字：新名字没设时该退回它
@@ -339,7 +358,7 @@ if __name__ == "__main__":
         except JevError as e:
             assert e.status is None and "密钥被拒" in str(e) and "or-key" not in str(e)
 
-    # 401/403 以外的状态码要把响应体带出来（别提前 read 把流吃空）
+    # 别的状态码只给 状态码 + 我们自己的提示，服务端响应体不进消息
     def _fake_key_429(req, timeout=None):
         raise urllib.error.HTTPError(OPENROUTER_KEY_URL, 429, "Too Many", {},
                                      io.BytesIO(b'{"error":{"message":"rate limited"}}'))
@@ -349,7 +368,7 @@ if __name__ == "__main__":
             list_models("openrouter", "or-key")
             raise SystemExit("应当抛错")
         except JevError as e:
-            assert "HTTP 429" in str(e) and "rate limited" in str(e)
+            assert "HTTP 429" in str(e) and "被限流" in str(e) and "rate limited" not in str(e)
 
     assert redact_secrets("key=ts-key or-key") == "key=[REDACTED] [REDACTED]"
     print("jev_client ok")

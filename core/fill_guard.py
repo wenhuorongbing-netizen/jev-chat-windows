@@ -17,3 +17,21 @@ def check_fill_target(chat: str, open_chat: str | None) -> str | None:
     if open_chat != chat:
         return "聊天窗口已经切到别的会话，没有填入"
     return None
+
+
+def check_fresh(chat: str, newest: tuple | None, fresh_chat: str | None,
+                fresh_msgs: list, has_input: bool) -> str | None:
+    """打字前一刻的新鲜核验：调用方刚刚重新读了目标窗口，这里比对读到的东西。
+    chat / newest = 生成候选时的会话名与最新一条 (谁, 正文)；fresh_chat = 这次读到的会话名（读不到标题 = None）；
+    fresh_msgs = 这次读到的 [(谁, 正文)]。任何一项对不上或读不出来都不填（False refusal 可以，错填不行）。"""
+    if not chat or not newest:
+        return "候选没有记录生成时的会话状态"
+    if fresh_chat is None:
+        return "现在读不到聊天窗口的会话标题，没有填入"
+    if fresh_chat != chat:
+        return "聊天窗口已经切到别的会话，没有填入"
+    if not has_input:
+        return "聊天窗口现在没有输入框，没有填入"
+    if not fresh_msgs or tuple(fresh_msgs[-1]) != tuple(newest):
+        return "会话里有新消息或已滚动，候选可能过期，没有填入"
+    return None

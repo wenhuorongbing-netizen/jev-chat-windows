@@ -11,13 +11,20 @@ import json
 import re
 
 try:  # 当模块导入 / 当脚本直接跑 都能用
-    from .jev_client import JevError, _api_key  # 复用 key 读取
+    from .jev_client import JevError, credential_for  # 复用 key 读取
+    from .keygate import Credential, destination_of
     from .llm import chat
     from .providers import DRAFT_PROVIDERS, LLM_ENV
 except ImportError:
-    from jev_client import JevError, _api_key
+    from jev_client import JevError, credential_for
+    from keygate import Credential, destination_of
     from llm import chat
     from providers import DRAFT_PROVIDERS, LLM_ENV
+
+
+def _credential(spec, base_url: str | None) -> Credential:
+    """起草那把 key + 这次真正要连的地址（同一个快照）：绑在别的接口上就抛 KeyRouteError，一个字节都不发。"""
+    return credential_for(LLM_ENV, destination_of(spec.protocol, base_url or spec.base))
 
 # 思考模式：V4.1 Flash 默认**开着**（effort=high，max_tokens 64K）——起草三句聊天回复用不上，慢还贵，
 # 默认一律关；设置里开了才让模型先想再写（draft_candidates 的 thinking 参数，各家的额外字段在表里）。
@@ -114,14 +121,14 @@ def _parse_candidates(content: str) -> list[str]:
         got += [c for c in (_clean(str(x)) for x in items) if c]
     if got:
         return got[:3]
-    raise JevError(f"起草结果解析不出候选: {content[:200]!r}")
+    raise JevError("起草结果解析不出候选")  # 模型原文可能带着聊天内容，不进异常消息
 
 
 def _parse_three(content: str) -> list[str]:
     """严格版：不足 3 条就抛（自测用）。"""
     got = _parse_candidates(content)
     if len(got) < 3:
-        raise JevError(f"起草结果解析不出 3 条: {content[:200]!r}")
+        raise JevError("起草结果解析不出 3 条")
     return got
 
 
@@ -223,7 +230,7 @@ def draft_candidates(messages: list, relationship: str, provider: str = "deepsee
     user += "\n\n按要求输出 JSON 对象：先 analysis，再恰好 3 条 replies，每条一句。"
     if avoid:  # 仅此一处提示词改动；avoid=None/空 时与现状逐字一致
         user += "\n\n以下几条已经出现过了，换一个角度，别重复：" + "；".join(avoid)
-    key = _api_key(LLM_ENV)  # 起草只有这一把 key，换来源不用重填
+    key = _credential(spec, base_url)  # 起草只有这一把 key，换来源不用重填；发往哪个接口跟 key 一起定下
     # 1.2：DeepSeek 自己推荐的闲聊档位，0.8 出来的话太板正
     # max_tokens：三句话本来 400 够，但思考过程也算进 max_tokens，开了思考模式 400 会把答案截断
     # 1.0：1.2 时偶尔冒出接不上话的怪句子；max_tokens 700：多了一句分析
@@ -298,7 +305,7 @@ def _parse_bilingual(content: str) -> dict:
     content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.MULTILINE).strip()
     start, end = content.find("{"), content.rfind("}")
     if start < 0 or end <= start:
-        raise JevError(f"双语结果不是 JSON: {content[:200]!r}")
+        raise JevError("双语结果不是 JSON")  # 不带模型原文：它可能把聊天内容复述回来
     try:
         obj = json.loads(content[start:end + 1])
     except ValueError as e:
@@ -347,8 +354,9 @@ def draft_bilingual(messages: list, relationship: str, provider: str = "deepseek
     user += "\n\n认出对方的语言，翻译对方最新的消息，并用同一种语言给出 3 条回复，按要求输出 JSON。"
     if avoid:  # 仅此一处提示词改动；avoid=None/空 时与现状逐字一致
         user += "\n\n以下几条已经出现过了，换一个角度，别重复：" + "；".join(avoid)
+    key = _credential(spec, base_url)
     content = _with_image_fallback(lambda img: chat(
-        spec.protocol, base_url or spec.base, _api_key(LLM_ENV), model or spec.default,
+        spec.protocol, base_url or spec.base, key, model or spec.default,
         BILINGUAL_SYSTEM, [user], temperature=0.9, max_tokens=4000 if thinking else 900,
         thinking=thinking, extra_body=spec.extra(thinking), headers=spec.headers,
         timeout=timeout, image=img), image)

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.overlay import Overlay
 from core import draft, engine
+from core.keygate import Credential
 
 app = QApplication.instance() or QApplication([])
 
@@ -88,7 +89,7 @@ class TestDraftAvoid:
             return content
 
         monkeypatch.setattr(draft, "chat", fake_chat)
-        monkeypatch.setattr(draft, "_api_key", lambda env: "")
+        monkeypatch.setattr(draft, "credential_for", lambda env, dest: Credential("", dest))
         return captured
 
     def test_avoid_none_prompt_byte_identical(self, monkeypatch):

@@ -34,7 +34,7 @@ from app.theme import (ACCENT, ACCENT_HOVER, ACCENT_PRESS, ACCENT_SOFT, AUX, BOD
                        HAIRLINE_STRONG, HOVER, INK, PRESS, QQ, R_CARD, R_PANEL, SKELETON, SUB,
                        SURFACE, TINY, TITLE, WARN, WECHAT, WHATSAPP)
 from app.version import VERSION
-from core import jev_client, llm, providers
+from core import jev_client, keygate, llm, providers
 from core.questions import CHOICE_LABELS
 
 _LOG_LINES = 300
@@ -1339,7 +1339,8 @@ class Overlay:
         provider = self._provider_of(group)
         custom = group.kind == "draft" and provider in providers.CUSTOM
         base = self.baseEdit.text().strip() if custom else None
-        key = group.keyEdit.text().strip() or group.stored_key()
+        typed = group.keyEdit.text().strip()
+        key = typed or group.stored_key()
         if not key:
             group.status.setText("先填密钥")
             return
@@ -1348,22 +1349,31 @@ class Overlay:
             return
         group.status.setText("获取中…")
         group.fetchButton.setEnabled(False)
-        threading.Thread(target=lambda: self._list_models(group, provider, key, base),
+        threading.Thread(target=lambda: self._list_models(group, provider, key, base, bool(typed)),
                          daemon=True).start()
 
-    def _list_models(self, group, provider, key, base):
-        """后台线程：判断走 jev_client，起草按协议走 llm；失败把原因一起送回主线程。"""
+    def _list_models(self, group, provider, key, base, typed=False):
+        """后台线程：判断走 jev_client，起草按协议走 llm；失败把原因一起送回主线程。
+        key 连同要发往的接口一起装进 Credential：刚敲的 key 就是给页面上选的这个接口的；存的 key 要过绑定核对。"""
         try:
             if group.kind == "jev":
-                models = jev_client.list_models(provider, key)
+                dest = jev_client.jev_destination(provider)
+                cred = (keygate.typed_credential(key, dest) if typed
+                        else keygate.stored_credential(providers.JEV_ENV, key, dest))
+                models = jev_client.list_models(provider, cred)
             else:
                 spec = providers.DRAFT_PROVIDERS[provider]
-                models = llm.list_models(spec.protocol, base or spec.base, key, headers=spec.headers)
+                dest = keygate.destination_of(spec.protocol, base or spec.base)
+                cred = (keygate.typed_credential(key, dest) if typed
+                        else keygate.stored_credential(providers.LLM_ENV, key, dest))
+                models = llm.list_models(spec.protocol, base or spec.base, cred, headers=spec.headers)
                 if spec.keep:  # 目录里混了别的协议时，只留这条路打得通的
                     models = [m for m in models if spec.keep(m)]
             reason = "" if models else "这个来源没返回任何模型"
         except Exception as exc:  # 线程里漏异常会静默吞掉，按钮就永远停在禁用态
-            models, reason = [], str(exc)[:120]
+            # 只有我们自己写的固定文案能显示；别的异常只报类型，不带任何异常原文
+            models, reason = [], (str(exc)[:120] if isinstance(exc, (jev_client.JevError, keygate.KeyRouteError))
+                                  else type(exc).__name__)
         self._fetched.done.emit(group, models, reason)
 
     def _models_fetched(self, group, models, reason):

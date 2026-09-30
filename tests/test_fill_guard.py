@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import main
-from core.fill_guard import check_fill_target
+from core.fill_guard import check_fill_target, check_fresh
 
 A, B = "QQ · 小王", "QQ · 老李"
 
@@ -25,6 +25,81 @@ class TestCheckFillTarget:
         assert check_fill_target("", A)
 
 
+NEWEST = ("her", "Wie geht es dir?")
+
+
+class TestCheckFresh:
+    def ok(self, **kw):
+        args = dict(chat=A, newest=NEWEST, fresh_chat=A, fresh_msgs=[("me", "hi"), NEWEST], has_input=True)
+        args.update(kw)
+        return check_fresh(args["chat"], args["newest"], args["fresh_chat"], args["fresh_msgs"], args["has_input"])
+
+    def test_same_conversation_and_same_newest_message_is_allowed(self):
+        assert self.ok() is None
+
+    def test_other_conversation_is_refused(self):
+        assert self.ok(fresh_chat=B)
+
+    def test_unreadable_title_is_refused(self):
+        assert self.ok(fresh_chat=None)
+
+    def test_same_title_but_a_newer_message_is_refused(self):
+        assert self.ok(fresh_msgs=[NEWEST, ("her", "在吗")])
+
+    def test_same_title_but_scrolled_away_is_refused(self):
+        assert self.ok(fresh_msgs=[("me", "hi")])
+        assert self.ok(fresh_msgs=[])
+
+    def test_no_input_box_is_refused(self):
+        assert self.ok(has_input=False)
+
+    def test_missing_generation_state_is_refused(self):
+        assert self.ok(newest=None)
+        assert self.ok(chat="")
+
+
+class TestFillUiaFreshVerification:
+    """fill_uia 打字前现读窗口：会话/最新消息对不上就一个字都不打（假 UIA，不碰真窗口）。"""
+
+    @pytest.fixture()
+    def rig(self, monkeypatch):
+        import app.fill as fill
+
+        typed, read = [], {"now": (A, [("me", "hi"), NEWEST], True)}
+        monkeypatch.setattr(fill, "_fresh_read", lambda hwnd, app: read["now"])
+        monkeypatch.setattr(fill, "_uia_input", lambda hwnd, app: SimpleNamespace(SetFocus=lambda: None))
+        monkeypatch.setattr(fill, "_to_front", lambda hwnd: None)
+        monkeypatch.setattr(fill, "_ctrl_end", lambda: None)
+        monkeypatch.setattr(fill, "type_text", typed.append)
+        return fill, typed, read
+
+    def test_matching_window_types(self, rig):
+        fill, typed, _ = rig
+        fill.fill_uia(1, "qq", "Hallo", (A, NEWEST))
+        assert typed == ["Hallo"]
+
+    def test_switched_conversation_types_nothing(self, rig):
+        fill, typed, read = rig
+        read["now"] = (B, [NEWEST], True)
+        with pytest.raises(RuntimeError):
+            fill.fill_uia(1, "qq", "Hallo", (A, NEWEST))
+        assert typed == []
+
+    def test_switch_after_focus_before_typing_types_nothing(self, rig, monkeypatch):
+        """第一次核验通过，取得焦点这段时间里窗口被切走：打字前第二次核验挡住。"""
+        fill, typed, read = rig
+        monkeypatch.setattr(fill, "_ctrl_end", lambda: read.update(now=(B, [NEWEST], True)))
+        with pytest.raises(RuntimeError):
+            fill.fill_uia(1, "qq", "Hallo", (A, NEWEST))
+        assert typed == []
+
+    def test_no_generation_state_types_nothing(self, rig):
+        fill, typed, _ = rig
+        with pytest.raises(RuntimeError):
+            fill.fill_uia(1, "qq", "Hallo", None)
+        assert typed == []
+
+
 @pytest.fixture()
 def wired(monkeypatch):
     """假界面 + 假 UIA 填入：记下 fill_uia 有没有被调到。"""
@@ -32,10 +107,13 @@ def wired(monkeypatch):
     # ov 只在 `python main.py` 的入口块里才建，import 时没有，所以 raising=False
     monkeypatch.setattr(main, "ov", SimpleNamespace(current_chat=lambda: A, at_prefix_enabled=lambda: False),
                         raising=False)
-    monkeypatch.setattr(main, "fill_uia", lambda hwnd, app, text: typed.append((hwnd, app, text)))
+    monkeypatch.setattr(main, "fill_uia", lambda hwnd, app, text, expect: typed.append((hwnd, app, text, expect)))
     monkeypatch.setattr(main, "fill_errors", __import__("queue").Queue())
     main.state["uia"] = {A: (1234, (10, 10))}
     main.state["app_chat"] = {"qq": A}
+    main.chats.pop(A, None)
+    chat = main.chat_of(A)  # 候选是针对 rev=3 时最新一条生成的，之后没再动过
+    chat.update(rev=3, result_rev=3, result_last=NEWEST)
     return typed
 
 
@@ -49,7 +127,20 @@ class TestFillReply:
     def test_fills_when_the_window_still_shows_the_conversation(self, wired):
         main.fill_reply("Hallo")
         _wait(lambda: wired)
-        assert wired == [(1234, "qq", "Hallo")]
+        assert wired == [(1234, "qq", "Hallo", (A, NEWEST))]
+
+    def test_a_newer_message_since_generation_types_nothing(self, wired):
+        """标题没变，但生成候选之后会话又来了新消息（rev 变了）：不填。"""
+        main.chat_of(A)["rev"] += 1
+        with pytest.raises(RuntimeError):
+            main.fill_reply("Hallo")
+        assert wired == []
+
+    def test_candidate_without_generation_record_types_nothing(self, wired):
+        main.chat_of(A)["result_last"] = None
+        with pytest.raises(RuntimeError):
+            main.fill_reply("Hallo")
+        assert wired == []
 
     def test_switch_from_A_to_B_then_tap_A_types_nothing(self, wired):
         main.state["app_chat"]["qq"] = B

@@ -137,16 +137,41 @@ def _uia_input(hwnd, app):
     return best[0] if best else None
 
 
-def fill_uia(hwnd, app, text):
-    """QQ / WhatsApp：焦点直接给输入框，然后打字。找不到输入框就抛错，由界面提示用户复制。"""
+def _fresh_read(hwnd, app):
+    """现读一遍这个窗口：→ (会话名 or None, [(谁, 正文)], 有没有输入框)。不用采集进程那份 ~1 秒前的缓存。"""
+    global _tree
+    from app.uia import APPS, PARSERS, _Tree
+
+    if _tree is None:
+        _tree = _Tree()
+    title, msgs, point = PARSERS[app](_tree.dump(hwnd, web_root=(app == "whatsapp")))
+    name = f"{APPS[app][0]} · {title}" if title else None  # 读不到标题就是「无法确认」，不套「当前会话」占位
+    return name, [(m[0], m[2]) for m in msgs], point is not None
+
+
+def _verify_fresh(hwnd, app, expect):
+    from core.fill_guard import check_fresh
+
+    chat, newest = expect
+    why = check_fresh(chat, newest, *_fresh_read(hwnd, app))
+    if why:
+        raise RuntimeError(why)
+
+
+def fill_uia(hwnd, app, text, expect):
+    """QQ / WhatsApp：焦点直接给输入框，然后打字。找不到输入框就抛错，由界面提示用户复制。
+    expect = (候选所属会话名, 生成时最新一条 (谁, 正文))；打字前会现读窗口核对，对不上或没给就不打字。"""
     import comtypes
 
+    if not expect:
+        raise RuntimeError("没有生成时的会话状态可核对，没有填入")
     try:  # 平时在后台线程里跑（见 main.fill_reply），这里给它初始化 COM；线程已经初始化过就沿用
         comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)
         mine = True
     except OSError:
         mine = False
     try:
+        _verify_fresh(hwnd, app, expect)  # 动焦点之前
         edit = _uia_input(hwnd, app)
         if edit is None:
             raise RuntimeError("没找到聊天输入框（窗口是不是停在会话列表？）")
@@ -154,6 +179,7 @@ def fill_uia(hwnd, app, text):
         edit.SetFocus()
         time.sleep(0.05)
         _ctrl_end()
+        _verify_fresh(hwnd, app, expect)  # 打字前一刻：带前台/聚焦的这段时间里也可能变
         type_text(text)
     finally:
         global _tree

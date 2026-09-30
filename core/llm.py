@@ -11,8 +11,10 @@ from __future__ import annotations
 
 try:  # 当模块导入 / 当脚本直接跑 都能用
     from .jev_client import JevError, _fail
+    from .keygate import Credential, destination_of, release
 except ImportError:
     from jev_client import JevError, _fail
+    from keygate import Credential, destination_of, release
 
 # Anthropic 开思考模式时的预算：起草三句话用不上更多；max_tokens 必须比它大，下面会兜住
 _THINK_BUDGET = 2048
@@ -24,16 +26,19 @@ def _turns(user_turns: list[str], assistant: str = "assistant") -> list[dict]:
             for i, text in enumerate(user_turns)]
 
 
-def chat(protocol: str, base_url: str | None, api_key: str, model: str, system: str,
+def chat(protocol: str, base_url: str | None, api_key: Credential, model: str, system: str,
          user_turns: list[str], *, temperature: float = 1.0, max_tokens: int = 400,
          thinking: bool = False, extra_body: dict | None = None,
          headers: dict | None = None, timeout: float = 30, image: str | None = None) -> str:
     """发一轮对话，返回模型输出的纯文本。
 
+    api_key 必须是 Credential（core/keygate）：它的接口跟这次真正要连的 base_url 对不上就抛
+    KeyRouteError，一个字节都不发；传裸字符串也不行。
     user_turns: 用户/助手交替的文本，奇数条，首尾都是用户说的（追问补齐候选就是 3 条）。
     thinking: 思考模式。OpenAI 协议没有统一字段，各家自己的开关由调用方经 extra_body 带进来；
               anthropic / gemini 是协议自带的参数，这里直接处理。
     """
+    api_key = release(api_key, destination_of(protocol, base_url))
     if protocol == "anthropic":
         return _anthropic(base_url, api_key, model, system, user_turns,
                           temperature, max_tokens, thinking, timeout)
@@ -117,9 +122,11 @@ def _gemini(base_url, api_key, model, system, user_turns, temperature, max_token
     return resp.text or ""
 
 
-def list_models(protocol: str, base_url: str | None, api_key: str,
+def list_models(protocol: str, base_url: str | None, api_key: Credential,
                 timeout: float = 10, headers: dict | None = None) -> list[str]:
-    """某个地址上能用的模型 id，去重排序。失败抛 JevError，消息直接显示在设置页上。"""
+    """某个地址上能用的模型 id，去重排序。失败抛 JevError，消息直接显示在设置页上。
+    api_key 同 chat()：必须是接口对得上 base_url 的 Credential。"""
+    api_key = release(api_key, destination_of(protocol, base_url))
     if protocol == "anthropic":
         import anthropic
 
@@ -160,6 +167,11 @@ if __name__ == "__main__":
     from google import genai
 
     seen: dict = {}
+
+    # 这个自测只关心喂给 SDK 的参数：把裸 key 包成「发往自己那个地址」的 Credential。接口对不上会被拒，见 tests/test_keygate.py
+    _chat, _list_models = chat, list_models
+    chat = lambda p, b, k, *a, **kw: _chat(p, b, Credential(k, destination_of(p, b)), *a, **kw)  # noqa: E731
+    list_models = lambda p, b, k, *a, **kw: _list_models(p, b, Credential(k, destination_of(p, b)), *a, **kw)  # noqa: E731
 
     def _fake(kind):
         """记下构造参数和调用参数的假客户端。"""
