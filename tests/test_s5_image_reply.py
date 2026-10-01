@@ -3,7 +3,7 @@
 发没发图、发了几次、图片什么时候不能再用。"""
 import pytest
 
-from core import capability, draft, engine
+from core import capability, draft, engine, retry
 from core.convo import Coordinator
 from core.jev_client import JevError
 from core.keygate import Credential, destination_of
@@ -64,7 +64,7 @@ class TestOneImageReply:
         assert p.sent == [IMG] and out["image_use"] == "attached"
 
     def test_unknown_and_explicit_refusal_falls_back_to_text_exactly_once(self, monkeypatch):
-        p = Provider(monkeypatch, capability.UNKNOWN, [JevError("不支持", 400), ENVELOPE])
+        p = Provider(monkeypatch, capability.UNKNOWN, [JevError("不支持", 400, image_unsupported=True), ENVELOPE])
         out = _reply(image=IMG)
         assert p.sent == [IMG, None] and out["image_use"] == "fell_back"
 
@@ -76,9 +76,9 @@ class TestOneImageReply:
         assert p.sent == [IMG]
 
     def test_a_generation_that_went_stale_makes_no_fallback_call(self, monkeypatch):
-        p = Provider(monkeypatch, capability.UNKNOWN, [JevError("不支持", 400), ENVELOPE])
+        p = Provider(monkeypatch, capability.UNKNOWN, [JevError("不支持", 400, image_unsupported=True), ENVELOPE])
         with pytest.raises(JevError):
-            _reply(image=IMG, still_wanted=lambda: len(p.sent) == 0)
+            _reply(image=IMG, egress=draft.ImageEgress(still_wanted=lambda: len(p.sent) == 0))
         assert p.sent == [IMG]
 
     def test_no_picture_leaves_the_text_request_alone(self, monkeypatch):
@@ -91,6 +91,41 @@ class TestOneImageReply:
         out = engine.analyze_bilingual([("her", "看这个", None)], ReplyPlan(ROUTE, "friends", 10, "", False,
                                                                            image_enabled=False), image=IMG)
         assert p.sent == [None] and out["image_use"] == "text_disabled"
+
+
+class TestImageEgressClosure:
+    """S5.1：一次生成里图片最多出去一次（被明确拒绝后粘住纯文字）；含糊的 4xx 不当成「不认图」。"""
+
+    @pytest.mark.parametrize("status", [400, 404, 413, 422])
+    def test_an_ambiguous_4xx_is_never_read_as_the_model_taking_no_images(self, monkeypatch, status):
+        p = Provider(monkeypatch, capability.UNKNOWN, [JevError("x", status), ENVELOPE])
+        with pytest.raises(JevError):
+            _reply(image=IMG)
+        assert p.sent == [IMG]
+
+    def _run_with_retry(self, p, is_live=lambda: True):
+        egress = draft.ImageEgress(still_wanted=is_live)
+        value = retry.run(lambda _n: _reply(image=IMG, egress=egress), is_live, pause=lambda n: None)
+        return value, egress
+
+    def test_after_an_explicit_refusal_a_transient_text_failure_never_uploads_the_picture_again(self, monkeypatch):
+        p = Provider(monkeypatch, capability.UNKNOWN, [JevError("no", 400, image_unsupported=True),
+                                                       JevError("busy", 503), ENVELOPE])
+        out, egress = self._run_with_retry(p)
+        assert p.sent == [IMG, None, None] and egress.uploads == 1 and out["image_use"] == "fell_back"
+
+    def test_a_stale_generation_makes_no_text_retry_after_the_refusal(self, monkeypatch):
+        p = Provider(monkeypatch, capability.UNKNOWN, [JevError("no", 400, image_unsupported=True),
+                                                       JevError("busy", 503), ENVELOPE])
+        live = iter([True, False])  # 回退那次问一次（还要），重试前问一次（已过期）
+        with pytest.raises(JevError):
+            self._run_with_retry(p, is_live=lambda: next(live, False))
+        assert p.sent == [IMG, None]
+
+    def test_a_transient_failure_before_any_refusal_still_retries_with_the_picture(self, monkeypatch):
+        p = Provider(monkeypatch, capability.UNKNOWN, [JevError("busy", 429), ENVELOPE])
+        out, egress = self._run_with_retry(p)
+        assert p.sent == [IMG, IMG] and out["image_use"] == "attached"
 
 
 class TestImageLifetimeIsTheReplySession:
@@ -197,3 +232,58 @@ class TestNoBackdoorsToTheOldPicture:
         c = Coordinator()
         c.messages("WhatsApp · A", [("her", None, "[图片]", IMG)])
         return c
+
+
+class TestImageIsOnlyForAnExplicitUserAction:
+    """S5.1：自动生成永远不带图；只有用户点「立即生成」那一次才发图。设置里的开关只是「允许手动用」。"""
+
+    @pytest.fixture
+    def app(self, monkeypatch):
+        import types
+
+        import main
+        c = Coordinator()
+        c.messages("WhatsApp · A", [("her", None, "[图片]", IMG)])
+        monkeypatch.setattr(main, "coord", c)
+        monkeypatch.setattr(main.settings, "read_images", lambda: True)
+        monkeypatch.setattr(main.settings, "has_llm_key", lambda: True)
+        monkeypatch.setattr(main, "snapshot_plan", lambda t, m: ReplyPlan(ROUTE, "friends", 10, "", False))
+        monkeypatch.setattr(main, "target_of", lambda t: None)
+        monkeypatch.setattr(main.settings, "reply_target", lambda: False)
+        monkeypatch.setattr(main, "ov", types.SimpleNamespace(
+            set_busy=lambda *a: None, current_chat=lambda: "WhatsApp · A", set_status=lambda *a, **k: None,
+            set_card_pending=lambda *a: None), raising=False)
+        started = []
+        monkeypatch.setattr(main.threading, "Thread", lambda target, args, daemon: types.SimpleNamespace(
+            start=lambda: started.append(args[0])))
+        return main, c, started
+
+    def test_an_automatic_generation_carries_no_picture(self, app):
+        main, c, started = app
+        main.start_analyze("WhatsApp · A", list(c.chat("WhatsApp · A").history))
+        assert started[0].image is None
+
+    def test_the_user_pressing_generate_now_may_carry_the_picture(self, app):
+        main, c, started = app
+        main.generate_now("WhatsApp · A")
+        assert started[0].image == IMG
+
+    def test_the_switch_off_still_wins_over_a_manual_request(self, app, monkeypatch):
+        main, c, started = app
+        monkeypatch.setattr(main.settings, "read_images", lambda: False)
+        main.generate_now("WhatsApp · A")
+        assert started[0].image is None
+
+    def test_a_reroll_of_a_result_that_never_carried_the_picture_does_not_carry_it(self, app):
+        main, c, started = app
+        req = c.begin("WhatsApp · A", [("her", "[图片]", None)])
+        c.finish(req, {"candidates": ["a", "b", "c"], "image_use": "none"})
+        main.reroll_reply(0)
+        assert started[0].image is None
+
+    def test_a_reroll_of_a_result_that_did_carry_the_picture_keeps_using_the_session(self, app):
+        main, c, started = app
+        req = c.begin("WhatsApp · A", [("her", "[图片]", None)], image=IMG)
+        c.finish(req, {"candidates": ["a", "b", "c"], "image_use": "attached"})
+        main.reroll_reply(0)
+        assert started[0].image == IMG

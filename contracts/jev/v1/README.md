@@ -13,6 +13,7 @@ boundaries. The files here are language-neutral test vectors; **each repo's own 
 | `fill_support.json` | which app fills how today (fresh-verified / copy-only; production is the truth, the file describes it) |
 | `capability.json` | can a route's model take images: four states + evidence, per-provider model-list adapters, the capability cache key, and what a request does with an image per state |
 | `retry_policy.json` | the seven failure classes (auth / rate_limited / timeout / unsupported / invalid_response / cancelled / transport), which are retried and how often, and that a stale generation never retries |
+| `image_rejection.json` | the only reliable signal that a failed picture request means "this model takes no images": a structured provider error code on 400/415/422; a status or a message alone never counts; no signal = fail closed |
 | `reply_outcome.json` | one reply round trip from the provider's message envelope to the parsed result or one fixed failure (refusal, malformed, fewer than three, analysis never a reply) |
 
 ## Rules

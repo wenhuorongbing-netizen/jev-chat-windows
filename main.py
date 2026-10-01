@@ -21,7 +21,7 @@ from app.version import VERSION
 from core import retry
 from core.convo import Coordinator
 from core.engine import analyze_bilingual, reroll_candidate
-from core.draft import IMAGE_NOTES
+from core.draft import IMAGE_NOTES, ImageEgress
 from core.fill_guard import FILL_SUPPORT, CopyOnly, check_fill_target
 from core.image_policy import newest_image
 from core.route import ReplyPlan, snapshot_route
@@ -81,7 +81,7 @@ def generate_now(title):
     if not msgs:
         ov.set_status("这个会话还没读到聊天记录", "warning")
         return
-    start_analyze(title, msgs)
+    start_analyze(title, msgs, manual=True)  # 明确的用户动作：这一次允许带图
 
 
 results = queue.Queue()  # (kind, 值, Request 或 RerollTicket)：回来的结果只带它的来历，谁算数由 coord 定
@@ -171,9 +171,12 @@ def on_toggle_capture(on):
     capture_on.set()
 
 
-def latest_image(title, msgs):
-    """只有「对方最新一条本身就是图」且用户开了识别图片才带图；更早的图不带（口径见 core/image_policy）。
-    在主线程里、发请求前算好放进 Request，网络线程不再回头读会话。"""
+def latest_image(title, msgs, manual=False):
+    """只有用户明确点了「立即生成」（manual）、「对方最新一条本身就是图」且设置里开了识别图片才带图；
+    自动生成永远不带图——设置里的开关只表示「允许我手动用图片功能」，不是每次都上传的长期授权。
+    更早的图不带（口径见 core/image_policy）。在主线程里、发请求前算好放进 Request，网络线程不再回头读会话。"""
+    if not manual:
+        return None
     chat = coord.chat(title)
     if len(msgs) != len(chat.history):  # 请求用的不是这个会话的最新状态，图对不上
         return None
@@ -200,8 +203,9 @@ def analyze_bg(req):
         return
     try:  # key 是为别的接口填的就一个字节都不发，也不重试（换来源/Base URL 之后必须重填）
         plan.route.require()
+        egress = ImageEgress(lambda: coord.is_live(req))  # 整个生成（含重试）共用：图被明确拒绝后不再重复外发
         value = retry.run(lambda _n: analyze_bilingual(list(req.msgs), plan, reply_to=req.reply_to, image=req.image,
-                                                             still_wanted=lambda: coord.is_live(req)),
+                                                       egress=egress),
                           lambda: coord.is_live(req))
     except Exception as e:
         results.put(("err", f"分析失败: {e}", req))
@@ -223,7 +227,9 @@ def reroll_reply(index):
     后台线程跑 engine.reroll_candidate，结果进 results 队列（kind="reroll"）。"""
     title = ov.current_chat()
     chat = coord.peek(title)
-    ticket = coord.reroll_begin(title, index, latest_image(title, list(chat.history)) if chat else None,
+    # 换一条只沿用「这份结果确实带过图」的图会话；自动生成出的结果没带过图，换一条也不带
+    manual = bool(chat and chat.result and chat.result.get("image_use") == "attached")
+    ticket = coord.reroll_begin(title, index, latest_image(title, list(chat.history), manual) if chat else None,
                                 snapshot_plan(title, list(chat.history)) if chat else None)
     if ticket is None:
         return
@@ -239,7 +245,7 @@ def _reroll_bg(ticket, result):
                                        result.get("lang") or "中文",
                                        list(result.get("candidates") or []),
                                        reply_to=result.get("reply_to"), image=ticket.image,
-                                       still_wanted=lambda: coord.reroll_valid(ticket))
+                                       egress=ImageEgress(lambda: coord.reroll_valid(ticket)))
         results.put(("reroll", (ticket.index, text, gloss, ""), ticket))
     except Exception as e:
         results.put(("reroll", (ticket.index, "", "", str(e)[:120]), ticket))
@@ -252,12 +258,12 @@ def check_update_bg():
         update_result.put(r)
 
 
-def start_analyze(title, msgs):
+def start_analyze(title, msgs, manual=False):
     if not settings.has_llm_key():
         ov.set_status(f"起草来源 {settings.draft_provider_name()} 没填密钥，去设置里补上", "warning")
         return
     reply_to = target_of(title) if settings.reply_target() else None  # 开关关着就是今天的行为
-    req = coord.begin(title, msgs, reply_to, latest_image(title, msgs),  # 这个会话已有一次在跑 → 排队，回来后接着跑最新的
+    req = coord.begin(title, msgs, reply_to, latest_image(title, msgs, manual),  # 这个会话已有一次在跑 → 排队，回来后接着跑最新的
                       plan=snapshot_plan(title, msgs))
     ov.set_busy(coord.is_generating(ov.current_chat()))
     if req is not None:
@@ -333,6 +339,10 @@ def drain():
             ov.set_status("你已回复，等待对方的新消息")
 
 
+def _newest_is_picture(req):
+    return bool(req.msgs) and req.msgs[-1][0] == "her" and "[图片]" in (req.msgs[-1][1] or "")
+
+
 def _take_result(kind, r, req):
     """一份回来的生成结果：算不算数由 coord 按 gen 判；算数才动界面。"""
     accepted, nxt = coord.finish(req, r if kind == "ok" else None)
@@ -345,6 +355,8 @@ def _take_result(kind, r, req):
         if req.title == ov.current_chat():  # 存着了；正看着这个会话才立刻贴上去
             ov.show(r)
             note = IMAGE_NOTES.get(r.get("image_use"))
+            if r.get("image_use") == "none" and settings.read_images() and _newest_is_picture(req):
+                note = "图片没有发出去；要让模型看图回复，点 ↻ 立即生成"
             if note:  # 图没发出去（设置关了 / 模型不看图 / 被拒）要说一声，别让人以为模型看过图
                 ov.set_status(note, "warning")
     else:

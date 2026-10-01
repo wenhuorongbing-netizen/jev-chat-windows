@@ -205,6 +205,30 @@ class TestCapabilityContract:
                 "reason": d.reason} == case["expect"]
 
 
+class TestImageRejectionContract:
+    DOC = _load("image_rejection.json")
+
+    def test_the_codes_are_exactly_the_contract(self):
+        assert set(jev_client.IMAGE_REJECTION_CODES) == set(self.DOC["codes"])
+
+    def test_the_statuses_are_exactly_the_contract(self):
+        assert set(jev_client._IMAGE_REJECTION_STATUSES) == set(self.DOC["statuses"])
+
+    def test_fail_turns_a_structured_sdk_body_into_one_flag_and_keeps_it_out_of_the_message(self):
+        class Boom(Exception):
+            status_code = 400
+            body = {"error": {"code": "image_not_supported", "message": "CHATMARKER key=sk-secret"}}
+
+        with pytest.raises(jev_client.JevError) as e:
+            jev_client._fail(Boom("CHATMARKER sk-secret"), "起草")
+        assert e.value.image_unsupported is True
+        assert "CHATMARKER" not in str(e.value) and "sk-secret" not in str(e.value)
+
+    @pytest.mark.parametrize("case", DOC["cases"], ids=lambda c: c["name"])
+    def test_signal(self, case):
+        assert jev_client.image_unsupported_signal(case["status"], case["body"]) is case["expect"]
+
+
 class TestRetryContract:
     DOC = _load("retry_policy.json")
 

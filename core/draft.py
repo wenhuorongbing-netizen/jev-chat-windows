@@ -141,7 +141,7 @@ def draft_candidates(messages: list, relationship: str, route: ReplyRoute,
                      reply_to: str | None = None, style: str = "", thinking: bool = False,
                      image: str | None = None,
                      info: dict | None = None, avoid: list[str] | None = None,
-                     image_enabled: bool = True, still_wanted=lambda: True) -> list[str]:
+                     image_enabled: bool = True, egress: ImageEgress | None = None) -> list[str]:
     """messages: [(from, text)] 或 [(from, text, name)]，from ∈ {her, me}，name = 群里的发言人；
     只看最近 keep 条。返回最多 3 条中文候选（过滤后可能是 0 条，调用方要处理）。
 
@@ -180,7 +180,7 @@ def draft_candidates(messages: list, relationship: str, route: ReplyRoute,
         route.protocol, route.base_url, key, route.model, SYSTEM, [user],
         temperature=1.0, max_tokens=4000 if thinking else 700, thinking=thinking,
         extra_body=spec.extra(thinking), headers=spec.headers, timeout=timeout, image=img),
-        image, route, image_enabled, still_wanted)
+        image, route, image_enabled, egress)
     cands, analysis = _parse_chinese(content)
     if info is not None:
         info["analysis"] = analysis
@@ -282,20 +282,37 @@ IMAGE_NOTES = {
 }
 
 
-def _with_image_fallback(send, image, route, owner_enabled=True, still_wanted=lambda: True):
-    """按能力判断带图：服务商明说不认图就不带；不知道就带着试，只有服务商把这次请求当成「不支持」拒了（unsupported 类）
-    且这一代还有人要，才退回纯文字再发一次；别的失败（密钥被拒、超时、限流……）是真失败，照常往上抛，不用换个姿势再打一遍。
+class ImageEgress:
+    """一次生成里图片出去的账：整个生成（含 core/retry 对整次尝试的重试）共用一个。
+    rejected = 服务商已经明说这个模型不认图，这一代之后只发文字，同一张图不再重复外发；
+    uploads = 带图请求发出过几次（测试用）；still_wanted = 这一代还有没有人要。"""
+
+    def __init__(self, still_wanted=lambda: True):
+        self.still_wanted = still_wanted
+        self.rejected = False
+        self.uploads = 0
+
+
+def _with_image_fallback(send, image, route, owner_enabled=True, egress=None):
+    """按能力判断带图：服务商明说不认图就不带；不知道就带着试，只有服务商用结构化错误码明说「不认图」
+    （JevError.image_unsupported，含糊的 4xx 不算）且这一代还有人要，才退回纯文字再发一次，并且这一代之后都只发文字
+    （egress.rejected，重试也不再带图）；别的失败（密钥被拒、超时、限流、含糊的 4xx……）是真失败，照常往上抛。
     返回 (正文, image_use)：none / attached / text_disabled / text_unsupported / fell_back。"""
+    egress = egress or ImageEgress()
     decision = image_decision(route, image, owner_enabled)
     if decision is None:
         return send(None), "none"
     if not decision.attach:
         return send(None), "text_disabled" if decision.effective == capability.DISABLED_BY_POLICY else "text_unsupported"
+    if egress.rejected:
+        return send(None), "fell_back"
+    egress.uploads += 1
     try:
         return send(image), "attached"
     except JevError as e:
-        if not (decision.fall_back_to_text and e.kind == "unsupported" and still_wanted()):
+        if not (decision.fall_back_to_text and e.image_unsupported and egress.still_wanted()):
             raise
+    egress.rejected = True
     return send(None), "fell_back"
 
 
@@ -303,7 +320,7 @@ def draft_bilingual(messages: list, relationship: str, route: ReplyRoute,
                     timeout: float = 30, keep: int = 10, reply_to: str | None = None,
                     style: str = "", thinking: bool = False, image: str | None = None,
                     avoid: list[str] | None = None, image_enabled: bool = True,
-                    still_wanted=lambda: True) -> dict:
+                    egress: ImageEgress | None = None) -> dict:
     """对方说外语时，一次调用：认出语言 L + 对方最新消息的中文翻译 + 3 条用 L 写的回复（各带中文对照）。
     只要起草那把 key，路由用快照（core/route.snapshot_route）。
     返回 {"lang", "translation", "candidates", "glosses"}，候选按推荐度排好。"""
@@ -325,7 +342,7 @@ def draft_bilingual(messages: list, relationship: str, route: ReplyRoute,
         route.protocol, route.base_url, key, route.model,
         BILINGUAL_SYSTEM, [user], temperature=0.9, max_tokens=4000 if thinking else 900,
         thinking=thinking, extra_body=spec.extra(thinking), headers=spec.headers,
-        timeout=timeout, image=img), image, route, image_enabled, still_wanted)
+        timeout=timeout, image=img), image, route, image_enabled, egress)
     return {**_parse_bilingual(content), "image_use": use}
 
 

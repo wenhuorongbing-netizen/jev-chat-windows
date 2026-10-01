@@ -1,0 +1,23 @@
+{
+  "contract": "image_rejection",
+  "version": 1,
+  "doc": "When a request that carried a picture fails, only a RELIABLE structured signal may turn that into 'this model does not take images' (and so into a text-only fallback). The signal is the provider's own error code or type (error.code, error.type, or the same two keys at the top level), compared case-insensitively against `codes`, on an HTTP 400, 415 or 422 only. A status alone proves nothing (404 may be a wrong model name, 413 is a payload that is too large, 400/422 may be a schema mistake), a human-readable message is never trusted, and auth statuses never count. The body is parsed into one local boolean and thrown away: no part of it is stored or shown. No signal = the failure is real and propagates (fail closed).",
+  "codes": ["image_not_supported", "unsupported_modality", "unsupported_image_input", "image_input_not_supported"],
+  "statuses": [400, 415, 422],
+  "cases": [
+    {"name": "400 with a matching error.code", "status": 400, "body": "{\"error\":{\"code\":\"image_not_supported\",\"message\":\"x\"}}", "expect": true},
+    {"name": "400 with a matching error.type", "status": 400, "body": "{\"error\":{\"type\":\"unsupported_modality\"}}", "expect": true},
+    {"name": "422 with a top-level code, any case", "status": 422, "body": "{\"code\":\"IMAGE_NOT_SUPPORTED\"}", "expect": true},
+    {"name": "415 with a matching code", "status": 415, "body": "{\"error\":{\"code\":\"unsupported_image_input\"}}", "expect": true},
+    {"name": "a message that says so is not a signal", "status": 400, "body": "{\"error\":{\"message\":\"image input is not supported by this model\"}}", "expect": false},
+    {"name": "a message that equals a code is still only a message", "status": 400, "body": "{\"error\":{\"message\":\"image_not_supported\"}}", "expect": false},
+    {"name": "400 with an unrelated code", "status": 400, "body": "{\"error\":{\"code\":\"invalid_request_error\"}}", "expect": false},
+    {"name": "400 without a body", "status": 400, "body": "", "expect": false},
+    {"name": "400 with a body that is not JSON", "status": 400, "body": "image_not_supported", "expect": false},
+    {"name": "a non-string code is ignored", "status": 400, "body": "{\"error\":{\"code\":400}}", "expect": false},
+    {"name": "404 never counts, even with the code", "status": 404, "body": "{\"error\":{\"code\":\"image_not_supported\"}}", "expect": false},
+    {"name": "413 never counts, even with the code", "status": 413, "body": "{\"error\":{\"code\":\"image_not_supported\"}}", "expect": false},
+    {"name": "401 never counts", "status": 401, "body": "{\"error\":{\"code\":\"image_not_supported\"}}", "expect": false},
+    {"name": "429 never counts", "status": 429, "body": "{\"error\":{\"code\":\"image_not_supported\"}}", "expect": false}
+  ]
+}

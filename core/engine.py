@@ -7,18 +7,18 @@
 from __future__ import annotations
 
 try:
-    from .draft import _similar, draft_bilingual, draft_candidates, her_latest, is_chinese
+    from .draft import ImageEgress, _similar, draft_bilingual, draft_candidates, her_latest, is_chinese
     from .jev_client import invalid_response
     from .route import ReplyPlan
 except ImportError:
-    from draft import _similar, draft_bilingual, draft_candidates, her_latest, is_chinese
+    from draft import ImageEgress, _similar, draft_bilingual, draft_candidates, her_latest, is_chinese
     from jev_client import invalid_response
     from route import ReplyPlan
 
 
 def analyze_bilingual(messages: list, plan: ReplyPlan, timeout: float = 30,
                       reply_to: str | None = None, image: str | None = None,
-                      still_wanted=lambda: True) -> dict:
+                      egress: ImageEgress | None = None) -> dict:
     """智能回复（跟随对方语言），只要起草那把 key：
     对方说中文 → 中文起草（口吻规则最全），不翻译；
     对方说外语 → 一次调用拿到「语言 + 中文翻译 + 3 条同语言回复（带中文对照）」。
@@ -31,7 +31,7 @@ def analyze_bilingual(messages: list, plan: ReplyPlan, timeout: float = 30,
         info = {}
         cands = draft_candidates(messages, plan.relationship, plan.route, timeout=timeout, keep=plan.context,
                                  reply_to=reply_to, style=plan.style, thinking=plan.thinking, image=image,
-                                 info=info, image_enabled=plan.image_enabled, still_wanted=still_wanted)
+                                 info=info, image_enabled=plan.image_enabled, egress=egress)
         if not cands:
             raise invalid_response("起草结果没有可用候选回复")
         return {"candidates": cands, "best_index": 0, "best_reply": cands[0], "scores": [],
@@ -40,7 +40,7 @@ def analyze_bilingual(messages: list, plan: ReplyPlan, timeout: float = 30,
                 "image_use": info.get("image_use", "none")}
     r = draft_bilingual(messages, plan.relationship, plan.route, timeout=timeout, keep=plan.context,
                         reply_to=reply_to, style=plan.style, thinking=plan.thinking, image=image,
-                        image_enabled=plan.image_enabled, still_wanted=still_wanted)
+                        image_enabled=plan.image_enabled, egress=egress)
     return {"candidates": r["candidates"], "best_index": 0, "best_reply": r["candidates"][0],
             "scores": [], "answers": {}, "usage": {}, "reply_to": reply_to,
             "lang": r["lang"] or "外语", "translation": r["translation"], "glosses": r["glosses"],
@@ -48,7 +48,7 @@ def analyze_bilingual(messages: list, plan: ReplyPlan, timeout: float = 30,
 
 
 def reroll_candidate(messages, plan: ReplyPlan, lang, existing, timeout=30,
-                     reply_to=None, image=None, still_wanted=lambda: True) -> tuple[str, str]:
+                     reply_to=None, image=None, egress: ImageEgress | None = None) -> tuple[str, str]:
     """重 roll 一条候选（「换一条」）：走与产生这批候选相同的起草路径
     （lang=="中文" → draft_candidates，否则 → draft_bilingual），existing 传给起草层避免重复。
     返回 (正文, 中文对照)：挑第一条与 existing 任何一条都不重复的（draft._similar，ratio ≥ 0.75）；
@@ -57,7 +57,7 @@ def reroll_candidate(messages, plan: ReplyPlan, lang, existing, timeout=30,
         cands = draft_candidates(messages, plan.relationship, plan.route, timeout=timeout, keep=plan.context,
                                  reply_to=reply_to, style=plan.style, thinking=plan.thinking,
                                  image=image, avoid=list(existing),
-                                 image_enabled=plan.image_enabled, still_wanted=still_wanted)
+                                 image_enabled=plan.image_enabled, egress=egress)
         if not cands:
             raise invalid_response("重 roll 起草结果没有可用候选回复")
         for cand in cands:
@@ -66,7 +66,7 @@ def reroll_candidate(messages, plan: ReplyPlan, lang, existing, timeout=30,
         return cands[0], ""
     r = draft_bilingual(messages, plan.relationship, plan.route, timeout=timeout, keep=plan.context,
                         reply_to=reply_to, style=plan.style, thinking=plan.thinking, image=image,
-                        avoid=list(existing), image_enabled=plan.image_enabled, still_wanted=still_wanted)
+                        avoid=list(existing), image_enabled=plan.image_enabled, egress=egress)
     for cand, gloss in zip(r["candidates"], r["glosses"]):
         if not any(_similar(cand, old) for old in existing):
             return cand, gloss

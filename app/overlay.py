@@ -1128,8 +1128,8 @@ class Overlay:
         images_row.addWidget(self.imagesSwitch)
         box.addLayout(images_row)
         box.addWidget(self._hint(
-            "默认关。打开后，只有对方的最新一条本身是图片时，才截窗口里那块缩小后发给起草模型看；"
-            "不读任何本地文件，不存盘。关着则图片只算「[图片]」。"
+            "默认关。打开只表示「允许我手动用」：自动生成永远不带图；只有你点 ↻ 立即生成、且对方最新一条本身是图片时，"
+            "才截窗口里那块缩小后发给起草模型看。不读任何本地文件，不存盘。关着则图片只算「[图片]」。"
         ))
         update_row = QHBoxLayout()
         update_row.addWidget(_label("启动时检查更新", AUX), 1)
