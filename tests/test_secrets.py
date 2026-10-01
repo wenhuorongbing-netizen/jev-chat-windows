@@ -10,7 +10,7 @@ import sys
 import pytest
 
 from app import secretstore, settings
-from core import keygate
+from core import jev_client, keygate
 from core.providers import JEV_ENV, LEGACY, LLM_ENV, draft_route, jev_route
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="DPAPI 只在 Windows 上")
@@ -190,7 +190,7 @@ class TestMigration:
         assert reg == {JEV_ENV: KEY}
         assert not os.path.exists(settings._CONFIG)
         assert issues and KEY not in " ".join(issues)
-        assert settings.jev_key() == KEY               # 仍可使用，不是迁坏了就用不了
+        assert settings.jev_key() == ""                # 保留不等于使用：没迁成功的明文不拿去发请求（S3.1）
 
     def test_a_read_back_mismatch_keeps_the_old_value(self, reg, monkeypatch):
         reg[JEV_ENV] = KEY
@@ -331,3 +331,146 @@ class TestMigration:
         reg[LLM_ENV] = KEY
         settings.migrate_legacy_keys()
         assert _cfg()["key_bindings"][LLM_ENV] == draft_route("deepseek")
+
+
+def _no_credential(env, destination):
+    """网络层此刻造不出这把 key 的 Credential（没有 key，或没有绑定）。"""
+    with pytest.raises((jev_client.JevError, keygate.KeyRouteError)) as e:
+        jev_client.credential_for(env, destination)
+    assert KEY not in str(e.value)
+
+
+class TestUnfinishedMigrationNeverSends:
+    """S3.1-A：旧明文迁不成功时「原样保留 + 报告 + 不使用」。启动时用户环境变量会被继承进本进程，所以每个场景都把它放进进程环境。"""
+    JEV_DEST = jev_route("openrouter")
+    LLM_DEST = draft_route("deepseek")
+
+    def _inherit(self, monkeypatch, reg, name, value=KEY):
+        reg[name] = value
+        monkeypatch.setenv(name, value)
+
+    def test_dpapi_failure_keeps_the_registry_key_and_gives_the_network_no_credential(self, reg, monkeypatch):
+        self._inherit(monkeypatch, reg, JEV_ENV)
+        monkeypatch.setattr(secretstore, "protect", lambda *a: (_ for _ in ()).throw(secretstore.SecretError("x")))
+        issues = settings.migrate_legacy_keys()
+        assert reg == {JEV_ENV: KEY} and issues
+        assert settings.has_jev_key() is False and os.environ.get(JEV_ENV) is None
+        _no_credential(JEV_ENV, self.JEV_DEST)
+
+    def test_config_write_failure_keeps_the_plaintext_and_sends_nothing(self, reg, monkeypatch):
+        self._inherit(monkeypatch, reg, LLM_ENV)
+        with monkeypatch.context() as m:
+            m.setattr(os, "replace", lambda *a: (_ for _ in ()).throw(PermissionError("locked")))
+            assert settings.migrate_legacy_keys()
+        assert reg == {LLM_ENV: KEY}
+        assert settings.has_llm_key() is False and os.environ.get(LLM_ENV) is None
+        _no_credential(LLM_ENV, self.LLM_DEST)
+
+    @pytest.mark.parametrize("damage", ["corrupt", "unreadable"])
+    def test_a_corrupt_or_unreadable_config_keeps_the_plaintext_and_sends_nothing(self, reg, monkeypatch, damage):
+        self._inherit(monkeypatch, reg, JEV_ENV)
+        if damage == "corrupt":
+            with open(settings._CONFIG, "w", encoding="utf-8") as f:
+                f.write('{"jev_provider": "ope')
+        else:
+            monkeypatch.setattr(settings, "_load_raw", lambda: (None, "unreadable"))
+        assert settings.migrate_legacy_keys()
+        assert reg == {JEV_ENV: KEY}
+        assert settings.has_jev_key() is False and os.environ.get(JEV_ENV) is None
+        _no_credential(JEV_ENV, self.JEV_DEST)
+
+    def test_a_generic_name_imported_ok_stays_in_place_and_jev_uses_its_own_encrypted_copy(self, reg, monkeypatch):
+        self._inherit(monkeypatch, reg, LEGACY[LLM_ENV])
+        settings.migrate_legacy_keys()
+        assert reg == {LEGACY[LLM_ENV]: KEY}                         # 别的工具还要用，不删
+        cred = jev_client.credential_for(LLM_ENV, self.LLM_DEST)     # deepseek 通用名当年就是给 deepseek 的
+        assert keygate.release(cred, self.LLM_DEST) == KEY
+        assert settings._stored_key(LLM_ENV) == KEY and KEY not in _cfg_text()
+
+    def test_a_generic_name_whose_import_failed_is_left_untouched_and_jev_refuses(self, reg, monkeypatch):
+        self._inherit(monkeypatch, reg, LEGACY[JEV_ENV])
+        monkeypatch.setattr(secretstore, "protect", lambda *a: (_ for _ in ()).throw(secretstore.SecretError("x")))
+        assert settings.migrate_legacy_keys()
+        assert reg == {LEGACY[JEV_ENV]: KEY} and os.environ.get(LEGACY[JEV_ENV]) == KEY   # 通用名原样、不替用户摘
+        assert settings.has_jev_key() is False
+        _no_credential(JEV_ENV, self.JEV_DEST)                       # 通用名不是 Jev 的 key 来源
+
+    def test_a_successful_migration_works_normally_through_the_network_layer(self, reg, monkeypatch):
+        self._inherit(monkeypatch, reg, LLM_ENV)
+        assert settings.migrate_legacy_keys() == []
+        _fresh_process(monkeypatch)
+        assert settings.has_llm_key() is True
+        cred = jev_client.credential_for(LLM_ENV, self.LLM_DEST)
+        assert keygate.release(cred, self.LLM_DEST) == KEY
+        with pytest.raises(keygate.KeyRouteError):                   # 绑定还在：换个目的地照样拒
+            jev_client.credential_for(LLM_ENV, draft_route("openrouter"))
+
+    def test_typed_credentials_from_the_settings_page_are_unaffected(self, reg, monkeypatch):
+        settings.save(draft_provider_text="deepseek", llm_key_text=KEY)
+        cred = jev_client.credential_for(LLM_ENV, self.LLM_DEST)
+        assert keygate.release(cred, self.LLM_DEST) == KEY
+        _fresh_process(monkeypatch)
+        assert settings.llm_key() == KEY
+
+    def test_a_key_only_in_the_process_environment_is_not_used_either(self, reg, monkeypatch):
+        monkeypatch.setenv(JEV_ENV, KEY)                             # 用户自己 set 的：证明不了该发往哪个接口
+        issues = settings.migrate_legacy_keys()
+        assert any(JEV_ENV in m for m in issues)
+        assert settings.has_jev_key() is False and os.environ.get(JEV_ENV) is None
+        _no_credential(JEV_ENV, self.JEV_DEST)
+
+    def test_even_if_something_puts_an_unbound_key_back_into_the_environment_the_gate_refuses(self, reg, monkeypatch):
+        monkeypatch.setenv(JEV_ENV, KEY)                             # 第二道：没有绑定记录 = 不发
+        _no_credential(JEV_ENV, self.JEV_DEST)
+
+    def test_an_undecryptable_stored_key_does_not_let_a_stale_inherited_value_through_its_binding(self, reg, monkeypatch):
+        settings.save(draft_provider_text="deepseek", llm_key_text=KEY)
+        data = _cfg()
+        data["secrets"][LLM_ENV] = "dpapi1:AAAA"                     # 绑定还在、密文坏了
+        with open(settings._CONFIG, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        _fresh_process(monkeypatch)
+        monkeypatch.setenv(LLM_ENV, OTHER)                           # 启动时继承来的旧值
+        settings.migrate_legacy_keys()
+        assert os.environ.get(LLM_ENV) is None
+        _no_credential(LLM_ENV, self.LLM_DEST)
+
+    def test_saving_other_settings_does_not_bind_a_plaintext_legacy_key(self, reg, monkeypatch):
+        self._inherit(monkeypatch, reg, LLM_ENV)
+        settings.save(draft_provider_text="openrouter")
+        assert settings.bindings_state() == {}                       # 以前这一步会把它绑到旧接口、再放行
+        assert settings.llm_key() == ""
+
+
+    def test_a_wrong_value_read_back_from_disk_does_not_leave_the_inherited_plaintext_matching_the_new_binding(self, reg, monkeypatch):
+        self._inherit(monkeypatch, reg, LLM_ENV)
+        real = secretstore.unprotect
+        calls = {"n": 0}
+
+        def flaky(token, slot):
+            calls["n"] += 1
+            return real(token, slot) if calls["n"] == 1 else "corrupted on disk"  # 第 1 次加密后核对，之后读盘读到别的值
+
+        monkeypatch.setattr(secretstore, "unprotect", flaky)
+        assert settings.migrate_legacy_keys()
+        assert reg == {LLM_ENV: KEY}                                 # 旧明文没删
+        assert os.environ.get(LLM_ENV) is None                       # 但绑定已经写进去了：继承来的明文不能留给网络层
+        monkeypatch.setattr(secretstore, "unprotect", real)
+        _no_credential_for_the_plaintext(LLM_ENV, self.LLM_DEST)
+
+
+def _no_credential_for_the_plaintext(env, destination):
+    """此刻网络层拿到的 key 不是旧明文（可以是空、或被拒，但绝不能是 KEY）。"""
+    try:
+        cred = jev_client.credential_for(env, destination)
+    except (jev_client.JevError, keygate.KeyRouteError):
+        return
+    assert keygate.release(cred, destination) != KEY
+
+
+def test_the_network_layer_does_not_read_generic_names_as_a_key(monkeypatch):
+    for generic in (LEGACY[JEV_ENV], LEGACY[LLM_ENV]):
+        monkeypatch.setenv(generic, KEY)             # 别的工具的变量：Jev 不拿来当自己的 key
+    for env in (JEV_ENV, LLM_ENV):
+        with pytest.raises(jev_client.JevError):
+            jev_client._api_key(env)

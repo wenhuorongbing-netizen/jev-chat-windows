@@ -339,21 +339,23 @@ def _stored_key(env_name: str) -> str:
     return key
 
 def _get_key(env_name: str) -> str:
-    """两把 key 之一。顺序：本进程环境 → 加密存储 → 老变量（迁移没做完或失败时还能用，见 migrate_legacy_keys）。"""
-    v = _read_env(env_name)
-    if v:
-        return v
+    """能拿去发请求的那把 key：只有加密存储里的（它跟接口绑在一起写进配置）。
+    进程环境、用户环境变量里的旧明文、通用名变量都不是来源——迁移没做完时旧明文只保留、不使用（S3.1）。"""
     v = _stored_key(env_name)
-    if not v:
-        v = _read_env(LEGACY[env_name]) or _registry_read(env_name) or _registry_read(LEGACY[env_name])
     if v:
-        _mirror_key(env_name, v)
+        _mirror_key(env_name, v)  # core/ 里的网络层按 os.environ 读，放进去的永远是加密存储里解出来的那把
     return v
+
+def _unmirror_key(env_name: str) -> None:
+    """本进程环境里这个名字的值不是从加密存储来的（启动时继承的旧明文、用户自己 set 的）：摘掉，网络层读不到它。
+    只动本进程的内存，不碰用户环境变量本身。"""
+    os.environ.pop(env_name, None)
 
 def migrate_legacy_keys() -> list[str]:
     """把老版本放在用户环境变量里的明文 key 迁进加密存储：找到 → 加密并读回核对 → 跟绑定一起原子写进配置 →
-    从磁盘重新读出来核对 → 才删旧明文。任何一步失败都停在那一步：旧明文原样还在、key 照常能用，
-    原因记进 secret_issues()。不会为了「迁成功」退到明文存储。返回当前没处理完的事。
+    从磁盘重新读出来核对 → 才删旧明文。任何一步失败都停在那一步：旧明文原样还在、但不使用，
+    原因记进 secret_issues()。旧明文「保留」不等于「使用」：没迁成功就没有绑定，Jev 不用它发任何请求，
+    要用得在设置里重新填（填了才有密文和绑定）。不会为了「迁成功」退到明文存储。返回当前没处理完的事。
     JEV_API_KEY / LLM_API_KEY 是本程序自己的名字，迁完即删；OPENROUTER_API_KEY / DEEPSEEK_API_KEY 是别的工具
     也常用的通用名，导进来但不替用户删，只提示。"""
     with _LOCK:
@@ -361,7 +363,12 @@ def migrate_legacy_keys() -> list[str]:
             try:
                 _migrate_one(env)
             except Exception as e:  # 不让迁移的问题挡住启动
-                _issue(f"migrate:{env}", f"{env} 迁移没做完（{type(e).__name__}）：旧的 key 原样保留、仍可使用，请在设置里重新保存一次。")
+                _issue(f"migrate:{env}", f"{env} 迁移没做完（{type(e).__name__}）：旧的 key 原样保留、但这次不会用它发请求，请在设置里重新填一次。")
+            inherited = _read_env(env)
+            if inherited and inherited != _stored_key(env):  # 不是从加密存储来的（继承来的旧明文、自己 set 的、读回对不上的）：不许留给网络层
+                _unmirror_key(env)
+                if f"migrate:{env}" not in _ISSUES:  # 迁移失败那条已经说了原因，别再报第二条
+                    _issue(f"ignored:{env}", f"进程环境里的 {env} 没有绑定接口，没有使用；请在设置里填 key。")
         return secret_issues()
 
 # 通用名那把 key 当年是为哪个接口填的：只能是它自己的来源，不能算成「现在选的来源」，否则别家的 key 会被绑去发给现在选的这家
@@ -369,7 +376,7 @@ _LEGACY_ROUTE = {JEV_ENV: lambda: jev_route("openrouter"), LLM_ENV: lambda: draf
 
 
 def _migrate_one(env: str) -> None:
-    _clear_issue(f"migrate:{env}", f"plain:{env}", f"keep:{env}", f"shared:{env}")
+    _clear_issue(f"migrate:{env}", f"plain:{env}", f"keep:{env}", f"shared:{env}", f"ignored:{env}")
     own, shared = _registry_read(env), _registry_read(LEGACY[env])
     stored = _stored_key(env)
     if stored:  # 已经在加密存储里（解得开）：新存的说了算，只剩清理旧明文
@@ -386,14 +393,14 @@ def _migrate_one(env: str) -> None:
         return
     _, status = _load_raw()
     if status in ("corrupt", "unreadable"):  # 不知道这把 key 原来绑的是哪个接口：配置没读明白之前不迁
-        _issue(f"migrate:{env}", f"{env} 迁移暂缓：配置文件读不了或已损坏，旧的 key 原样保留、仍可使用。")
+        _issue(f"migrate:{env}", f"{env} 迁移暂缓：配置文件读不了或已损坏，旧的 key 原样保留、但这次不会用它发请求，请在设置里重新填一次。")
         return
     try:
         token = secretstore.protect(legacy, env)
         if secretstore.unprotect(token, env) != legacy:
             raise SecretError("read-back mismatch")
     except SecretError:
-        _issue(f"migrate:{env}", f"{env} 没能加密（DPAPI 失败）：旧的 key 原样保留、仍可使用。")
+        _issue(f"migrate:{env}", f"{env} 没能加密（DPAPI 失败）：旧的 key 原样保留、但这次不会用它发请求，请在设置里重新填一次。")
         return
     route = _bindings().get(env) or (_current_route(env) if own else _LEGACY_ROUTE[env]())
 
@@ -407,10 +414,10 @@ def _migrate_one(env: str) -> None:
     try:
         _update(mutate)
     except OSError:
-        _issue(f"migrate:{env}", f"{env} 没能写进配置文件：旧的 key 原样保留、仍可使用。")
+        _issue(f"migrate:{env}", f"{env} 没能写进配置文件：旧的 key 原样保留、但这次不会用它发请求，请在设置里重新填一次。")
         return
     if _stored_key(env) != legacy:  # 从磁盘读回来核对，不是信内存里那份
-        _issue(f"migrate:{env}", f"{env} 写进配置后读回核对不上：旧的 key 原样保留、仍可使用。")
+        _issue(f"migrate:{env}", f"{env} 写进配置后读回核对不上：旧的 key 原样保留、但这次不会用它发请求，请在设置里重新填一次。")
         return
     _mirror_key(env, legacy)
     if own:
@@ -467,14 +474,14 @@ def _current_route(env_name: str, jev_provider_now: str | None = None) -> str:
     return jev_route(jev_provider_now or jev_provider()) if env_name == JEV_ENV else draft_route(draft_provider(), draft_base_url())
 
 def key_for_route(env_name: str, route: str) -> str:
-    """存的 key，但只在它绑定的就是 [route]（或从没绑过）时才给；绑在别的接口上就当没配，返回空。"""
+    """存的 key，但只在它绑定的就是 [route] 时才给；绑在别的接口上（或没有绑定记录）就当没配，返回空。"""
     bindings = _bindings()
     return "" if env_name in bindings and bindings[env_name] != route else _get_key(env_name)
 
 def require_key_route(env_name: str) -> None:
     """界面层的快速失败（不重试、给一句人话）：这把 key 绑定的接口跟现在选的接口不一致就抛 KeyRouteError。
     真正的边界在网络出口（core/keygate：llm / jev_client 只收 Credential），这里不是唯一一道。
-    没有绑定记录（老版本存的 key）视为还没换过来源：save() 换来源前会先把它绑到旧接口上。"""
+    没有绑定记录的 key 不存在于加密存储里（迁移之前的明文不会被使用），这里只比对有记录的。"""
     bindings = _bindings()
     now = _current_route(env_name)
     if env_name in bindings and bindings[env_name] != now:
@@ -500,16 +507,15 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
     with _LOCK:
         jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
         draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
-        # key 跟接口绑定：这次填的 key 绑到这次保存的接口；没重填的老 key 若还没绑过，先绑到「保存前」的接口，
-        # 这样下面换了来源/Base URL 之后旧 key 就发不出去，要重填（require_key_route）
+        # key 跟接口绑定：这次填的 key 绑到这次保存的接口；没重填的 key 保持原来的绑定，换了来源/Base URL 就发不出去，要重填
         new_base = str(_read("draft_base_url") or "") if draft_base_url_text is None else str(draft_base_url_text).strip()
         rows = []
-        for env, typed, old_route, new_route in (
-                (JEV_ENV, jev_key_text, _current_route(JEV_ENV), jev_route(jev)),
-                (LLM_ENV, llm_key_text, _current_route(LLM_ENV), draft_route(draft, new_base))):
+        for env, typed, new_route in (
+                (JEV_ENV, jev_key_text, jev_route(jev)),
+                (LLM_ENV, llm_key_text, draft_route(draft, new_base))):
             typed = (typed or "").strip()
             rows.append((env, typed, secretstore.protect(typed, env) if typed else "",  # 失败就抛，什么都没动
-                         old_route, new_route, bool(_get_key(env))))
+                         new_route))
         n = context() if context_n is None else max(3, min(100, int(context_n)))
         # 空串 = 清掉，None = 原样留着（读原始字段，别读补过默认值的那个）
         keep = lambda new, name: str(_read(name) or "") if new is None else str(new).strip()
@@ -536,12 +542,10 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
             # 在读到的整份配置上原地改：别的模块管的字段（chat_rel / chat_meta / win_*）和以后新加的字段原样留着
             secrets = dict(data["secrets"]) if isinstance(data.get("secrets"), dict) else {}
             bindings = dict(data["key_bindings"]) if isinstance(data.get("key_bindings"), dict) else {}
-            for env, typed, token, old_route, new_route, have in rows:
+            for env, typed, token, new_route in rows:
                 if typed:
                     secrets[env] = token
                     bindings[env] = new_route
-                elif env not in bindings and have:
-                    bindings[env] = old_route
             data.update(fields)
             data["secrets"], data["key_bindings"] = secrets, bindings
 

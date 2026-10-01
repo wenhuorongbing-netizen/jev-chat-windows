@@ -79,17 +79,12 @@ class TestBindingOnSave:
         with pytest.raises(settings.KeyRouteError):
             settings.require_key_route(LLM_ENV)
 
-    def test_legacy_key_with_no_binding_is_bound_to_the_old_route_before_a_switch(self, env):
-        # 升级前存的 key：没有绑定记录。用户先在设置里换来源、没重填 key
+    def test_a_plaintext_legacy_key_is_never_bound_or_used_by_saving_other_settings(self, env):
+        # 升级前存的明文 key：没有迁成功之前不使用，保存别的设置也不会把它悄悄绑到某个接口上（S3.1）
         env[LEGACY[LLM_ENV]] = FAKE_KEY
-        settings.save(draft_provider_text="openrouter")  # 保存前的来源是默认的 deepseek
-        with pytest.raises(settings.KeyRouteError):
-            settings.require_key_route(LLM_ENV)
-        assert _bindings(settings._CONFIG)[LLM_ENV] == "https://api.deepseek.com"
-
-    def test_unbound_legacy_key_still_works_on_its_current_route(self, env):
-        env[LEGACY[LLM_ENV]] = FAKE_KEY
-        settings.require_key_route(LLM_ENV)  # 还没换过来源，不打扰老用户
+        settings.save(draft_provider_text="openrouter")
+        assert _bindings(settings._CONFIG) == {}
+        assert settings.llm_key() == ""
 
 
 class TestNothingIsSentAfterASwitch:

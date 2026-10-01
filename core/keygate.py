@@ -7,8 +7,8 @@ key 和「它准备发往的接口」在同一个不可变对象里，发出前�
 
 Credential 只能由两个入口造：
 - stored_credential：存下来的 key。它绑定的接口（config.json 的 key_bindings，只记接口不含 key）
-  按 BindingState 四种状态各有一个结局：对得上放行、对不上抛 KeyRouteError、没有绑定记录（老版本存的 key）
-  放行（S3 之后存下来的 key 都是加密并同时绑定的；只有迁移没做完、或直接从进程环境来的 key 才会在这个状态）、记录读不了（配置损坏）拒发。
+  按 BindingState 四种状态各有一个结局：对得上放行，其余三种（对不上 / 没有绑定记录 / 记录读不了）都抛 KeyRouteError、不发。
+  没有绑定记录的 key（迁移没做完的旧明文、直接从进程环境来的）证明不了该发往哪个接口，S3.1 起一律不发。
 - typed_credential：用户刚在设置页里为当前所选接口敲的 key，接口就是页面上选的那个。
 """
 from __future__ import annotations
@@ -55,13 +55,13 @@ class BindingState(str, Enum):
     「没有记录」和「记录读不了」必须分开：以前两者都是 None，读不了也被当成老 key 放行。"""
     BOUND_MATCH = "BOUND_MATCH"                # 绑定 == 目的地 → 发
     BOUND_MISMATCH = "BOUND_MISMATCH"          # 绑定 != 目的地 → 拒
-    LEGACY_UNBOUND = "LEGACY_UNBOUND"          # 读得了、但这把 key 没有记录（老版本存的）→ 发；迁移没做完（失败会报告、旧值不毁）或直接来自进程环境才会在这个状态
+    LEGACY_UNBOUND = "LEGACY_UNBOUND"          # 读得了、但这把 key 没有记录（老版本留下的 / 进程环境来的）→ 拒；这个状态只做记录，不再放行
     BINDING_UNAVAILABLE = "BINDING_UNAVAILABLE"  # 记录读不了（配置损坏 / 设置模块加载不了）→ 拒
 
 
 # 各状态该不该发；stored_credential 只认这张表
 SENDS = {BindingState.BOUND_MATCH: True, BindingState.BOUND_MISMATCH: False,
-         BindingState.LEGACY_UNBOUND: True, BindingState.BINDING_UNAVAILABLE: False}
+         BindingState.LEGACY_UNBOUND: False, BindingState.BINDING_UNAVAILABLE: False}
 
 
 def _read_bindings() -> dict | None:
@@ -96,6 +96,8 @@ def stored_credential(env: str, key: str, destination: str) -> Credential:
         if state is BindingState.BOUND_MISMATCH:
             raise KeyRouteError(f"接口已换成 {destination}，但保存的 key 是给 {bound} 填的，没有发送。"
                                 "请在设置里重新填这个接口的 key。")
+        if state is BindingState.LEGACY_UNBOUND:
+            raise KeyRouteError("这把 key 没有绑定的接口（老版本留下的），没有发送。请在设置里重新填一次 key。")
         raise KeyRouteError("读不到这把 key 绑定的接口（配置文件损坏或无法读取），没有发送。"
                             "请在设置里重新保存这个接口的 key。")
     return Credential(key, destination)

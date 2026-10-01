@@ -158,9 +158,10 @@ class TestLowLevelClientsRefuseWithoutTheGuard:
         assert transport.built[0]["api_key"] == FAKE_KEY
         assert transport.built[0]["base_url"] == "https://api.deepseek.com"
 
-    def test_unbound_legacy_key_still_works_on_the_current_route(self, cfg, transport):
-        out = draft.draft_candidates(MSGS, "friends", provider="deepseek")  # 没有绑定记录：老用户照旧
-        assert len(out) == 3
+    def test_an_unbound_key_sends_nothing_even_on_the_route_it_was_meant_for(self, cfg, transport):
+        with pytest.raises(KeyRouteError):  # 没有绑定记录 = 证明不了该发往哪（S3.1 起不再放行）
+            draft.draft_candidates(MSGS, "friends", provider="deepseek")
+        assert transport.built == []
 
     def test_jev_ask_bound_to_the_other_source_sends_nothing(self, cfg, monkeypatch):
         cfg(JEV_ENV, jev_route("typesafe"))

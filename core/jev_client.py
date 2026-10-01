@@ -18,11 +18,11 @@ from typing import NoReturn
 
 try:  # 当模块导入 / 当脚本直接跑 都能用
     from .keygate import Credential, destination_of, release, stored_credential
-    from .providers import (ENV_VARS, JEV_ENV, JEV_PROVIDERS, LEGACY,
+    from .providers import (ENV_VARS, JEV_ENV, JEV_PROVIDERS,
                             OPENROUTER_DECISIONS, OPENROUTER_KEY_URL, TYPESAFE_BASE)
 except ImportError:
     from keygate import Credential, destination_of, release, stored_credential
-    from providers import (ENV_VARS, JEV_ENV, JEV_PROVIDERS, LEGACY,
+    from providers import (ENV_VARS, JEV_ENV, JEV_PROVIDERS,
                            OPENROUTER_DECISIONS, OPENROUTER_KEY_URL, TYPESAFE_BASE)
 
 MAX_RETRIES = 3
@@ -81,9 +81,9 @@ def _fail(exc: Exception, what: str) -> NoReturn:
 
 
 def _api_key(env: str = JEV_ENV) -> str:
-    """两把 key 之一（JEV_API_KEY / LLM_API_KEY）。新名字空着就退回老名字，老用户不用重填。"""
-    key = ((os.environ.get(env) or "").strip()
-           or (os.environ.get(LEGACY.get(env, "")) or "").strip())
+    """两把 key 之一（JEV_API_KEY / LLM_API_KEY）。只读自己的名字：app 把加密存储里解出来的那把放在这里；
+    OPENROUTER_API_KEY / DEEPSEEK_API_KEY 这些通用名是别的工具的东西，这里不读（S3.1）。"""
+    key = (os.environ.get(env) or "").strip()
     if not key:
         raise JevError(
             f"{env} is not set. Export it in the environment; "
@@ -262,10 +262,21 @@ if __name__ == "__main__":
     from app import settings as _settings
     _settings._CONFIG = os.path.join(os.environ.get("TEMP", "."), "jev-selftest-missing.json")
 
+    class _AnyRoute(str):  # 自测只关心喂给 SDK 的参数：假装这把 key 绑在「现在要连的」接口上（绑定的真实行为见 tests/test_keygate.py）
+        def __eq__(self, other):
+            return True
+        __hash__ = str.__hash__
+
+    _settings.bindings_state = lambda: {JEV_ENV: _AnyRoute("*")}
+
     os.environ.pop(JEV_ENV, None)
-    os.environ["OPENROUTER_API_KEY"] = "or-key"  # 老名字：新名字没设时该退回它
-    assert _api_key(JEV_ENV) == "or-key"
-    os.environ[JEV_ENV] = "ts-key"  # 新名字在就用新的，两家来源共用这一把
+    os.environ["OPENROUTER_API_KEY"] = "or-key"  # 通用名是别的工具的：不读（S3.1）
+    try:
+        _api_key(JEV_ENV)
+        raise AssertionError("通用名变量不该被当成 key")
+    except JevError:
+        pass
+    os.environ[JEV_ENV] = "ts-key"  # 两家来源共用这一把
     questions = dict(JUDGE_QUESTIONS)
     questions.update(build_rank_question(["甲", "乙", "丙"]))
     seen: dict = {}
