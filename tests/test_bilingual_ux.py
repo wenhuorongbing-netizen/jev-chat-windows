@@ -149,7 +149,6 @@ class TestShowGlossSetting:
     def test_default_on_and_persist(self, tmp_path, monkeypatch):
         import app.settings as settings
         monkeypatch.setattr(settings, "_CONFIG", str(tmp_path / "c.json"))
-        monkeypatch.setattr(settings, "_set_key", lambda *a: None)
         monkeypatch.setattr(settings, "_notify_env", lambda: None)
         assert settings.show_gloss() is True, "缺省开"
         settings.save(show_gloss_on=False)

@@ -21,7 +21,7 @@ def env(tmp_path, monkeypatch):
     """假配置文件 + 假环境（key 只在这个 dict 里）；返回这个 dict。"""
     monkeypatch.setattr(settings, "_CONFIG", str(tmp_path / "c.json"))
     store = {}
-    monkeypatch.setattr(settings, "_set_key", lambda name, value: store.__setitem__(name, value))
+    monkeypatch.setattr(settings, "_mirror_key", lambda name, value: store.__setitem__(name, value))
     monkeypatch.setattr(settings, "_read_env", lambda name: store.get(name, ""))
     monkeypatch.setattr(settings, "_notify_env", lambda: None)
     return store

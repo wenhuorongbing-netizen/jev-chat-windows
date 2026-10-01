@@ -26,8 +26,8 @@
 
 要求：Windows 10 1903+ / 11，聊天窗口开着，两个 API key（判断一个、起草一个，见下）。
 
-首次启动会弹设置页填这两个 key。key 写进 Windows 用户环境变量（注册表 `HKCU\Environment`）——
-全程只有 `JEV_API_KEY` 和 `LLM_API_KEY` 这两个，不落任何文件；其余设置写在 exe 旁边的
+首次启动会弹设置页填这两个 key。key 用 Windows DPAPI 加密后存进 exe 旁边的 `config.json`（只有你这个 Windows 账户能解开），
+全程只有 `JEV_API_KEY` 和 `LLM_API_KEY` 这两个槽，明文不落任何文件；其余设置也写在 exe 旁边的
 `config.json`，整个文件夹拷走设置也跟着走。
 
 > exe 没签名，SmartScreen 会拦一下：「更多信息」→「仍要运行」。介意就往下看「自己打包」，自己打的更踏实。
@@ -124,10 +124,11 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，起草基本就是一�
 - **不碰钱。** 转账、红包、收款相关的界面元素一律不碰，起草的 system prompt 里也禁了这几个话题。
 - **只有对方的新消息到来（或你在群里换了回复对象）才调一次模型。** 静默期零调用——十分钟没人说话
   就是十分钟零 token。
-- **API key 只进环境变量，而且全程只有两个。** `JEV_API_KEY`（判断）和 `LLM_API_KEY`（起草），
-  不管来源选哪家都是这两个槽。都写进注册表 `HKCU\Environment`（跟 `setx` 同一个地方），任何文件里
-  都不出现 key，也绝不进日志（报错文本一律脱敏）。老版本按来源分开存的 `OPENROUTER_API_KEY` /
-  `DEEPSEEK_API_KEY` 仍然能读到，保存一次就迁到新名字上。
+- **API key 只以 DPAPI 密文落盘，而且全程只有两个。** `JEV_API_KEY`（判断）和 `LLM_API_KEY`（起草），
+  不管来源选哪家都是这两个槽。密文和它绑定的接口在同一次原子写里存进 `config.json`，任何文件里都没有明文，
+  也绝不进日志（报错文本一律脱敏）。老版本放在用户环境变量里的明文 key 只当迁移来源：启动时加密导入、
+  读回核对通过后才删掉 `JEV_API_KEY` / `LLM_API_KEY` 这两个旧变量；任何一步失败都保留旧值并在界面提示，
+  不会退到明文存储。`OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` 是别的工具也常用的通用名：只导入，不替你删。
 - **启动时查一次版本号（可关）。** 只向 GitHub Releases API 发一个 GET，带的只有 UA 和当前版本号，
   不夹带任何聊天内容；设置里「启动时检查更新」关掉就完全不发这个请求，源码直接跑（没有版本号）也
   不会发。
@@ -250,8 +251,8 @@ python main.py
 PyCharm / VS Code 里直接 Run `main.py` 也行。
 
 首次启动会自动弹出设置页：填两把 key（判断 `JEV_API_KEY`、起草 `LLM_API_KEY`，见上面「使用说明」），
-选你们的关系（恋人 / 朋友 / 同事 / 家人 / 自定义）。key 写进注册表 `HKCU\Environment`，重启后依然有效，
-不落任何文件；其余设置写进项目根的 `config.json`（已在 `.gitignore` 里）。
+选你们的关系（恋人 / 朋友 / 同事 / 家人 / 自定义）。key 加密后存进 `config.json`，重启后依然有效，
+不存明文；其余设置也写进项目根的 `config.json`（已在 `.gitignore` 里）。保存失败会明说，不会显示「已保存」。
 
 ### 自己打包
 
@@ -279,11 +280,11 @@ pyinstaller --noconfirm --clean jev.spec
 | 启动时检查更新 | 开了才在启动时查一次 GitHub 最新版本号，有新版本就在标题栏下面提示 | `config.json` → `check_update`（默认开） |
 | 调试视图 | 另开一个窗口实时显示截到的画面和识别框，看识别在哪一步认错。拨一下立刻生效，不用点保存；关掉那个窗口等于关掉开关 | `config.json` → `debug_view`（默认关） |
 | 判断 · 来源 | OpenRouter 还是 TypeSafe 直连 | `config.json` → `jev_provider`（默认 `openrouter`） |
-| 判断 · 密钥 | 上面选哪家就填哪家的 key。已配置时留空 = 保留 | 注册表 `HKCU\Environment` → `JEV_API_KEY` |
+| 判断 · 密钥 | 上面选哪家就填哪家的 key。已配置时留空 = 保留 | `config.json` 里的 DPAPI 密文（槽 `JEV_API_KEY`） |
 | 判断 · 模型 | 可手打，也可点「获取模型」拉列表挑 | `config.json` → `jev_model`（空 = 该来源默认） |
 | 起草 · 来源 | 上面那张表里的任意一家 | `config.json` → `draft_provider`（默认 `deepseek`） |
 | 起草 · Base URL | 只有两个「自定义」来源才出现这一行 | `config.json` → `draft_base_url` |
-| 起草 · 密钥 | 上面选哪家就填哪家的 key。已配置时留空 = 保留 | 注册表 `HKCU\Environment` → `LLM_API_KEY` |
+| 起草 · 密钥 | 上面选哪家就填哪家的 key。已配置时留空 = 保留 | `config.json` 里的 DPAPI 密文（槽 `LLM_API_KEY`） |
 | 起草 · 模型 | 可手打，也可点「获取模型」拉列表挑 | `config.json` → `draft_model`（空 = 该来源默认） |
 | 起草时开启思考模式 | 开了模型先想再写，慢好几倍、贵一些 | `config.json` → `thinking`（默认关） |
 

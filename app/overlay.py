@@ -913,7 +913,7 @@ class Overlay:
         if on == self.docked:
             return
         self.docked = on
-        settings.save(dock_on=on)
+        settings.try_save(dock_on=on)
         self._paint_pin()
         self.docker.set_enabled(on)
         if on and self._chat_hwnd:
@@ -1463,6 +1463,9 @@ class Overlay:
                           bilingual_on=bilingual,
                           read_images_on=self.imagesSwitch.isChecked(),
                           show_gloss_on=self.glossSwitch.isChecked())
+        except settings.SecretError:
+            self._settings_feedback("密钥没能加密保存（Windows 数据保护不可用），什么都没有保存。", error=True)
+            return
         except Exception:
             self._settings_feedback("保存失败，请检查配置文件是否可写后重试。", error=True)
             return
@@ -1476,7 +1479,7 @@ class Overlay:
 
     def _debug_toggled(self, on):
         """调试视图独立于「保存设置」：拨一下就开窗/收窗，顺手落盘，重启还在。"""
-        settings.save(debug_view_on=on)
+        settings.try_save(debug_view_on=on)
         if self.on_toggle_debug:
             self.on_toggle_debug(on)
 
@@ -1932,9 +1935,12 @@ class Overlay:
         """用户给当前会话改了关系：记住，刷新胶囊，并按新关系马上重新生成。"""
         if not self._shown:
             return
-        settings.set_chat_relationship(self._shown, _CHAT_RELATIONSHIPS[index][1])
+        saved = settings.set_chat_relationship(self._shown, _CHAT_RELATIONSHIPS[index][1])
         self._load_rel(self._shown)
-        self.set_status(f"已记住：这个会话按「{_CHAT_RELATIONSHIPS[index][0]}」来写", "success")
+        if saved:
+            self.set_status(f"已记住：这个会话按「{_CHAT_RELATIONSHIPS[index][0]}」来写", "success")
+        else:
+            self.set_status("这次的关系没能存进配置文件，重启后会恢复原样", "warning")
         if self.on_generate:
             self.on_generate(self._shown)
 
@@ -1978,9 +1984,11 @@ class Overlay:
         if not self._shown:
             return
         muted = not settings.chat_meta(self._shown).get("muted")
-        settings.set_chat_meta(self._shown, muted=muted)
+        saved = settings.set_chat_meta(self._shown, muted=muted)
         self._paint_mute()
-        if muted:
+        if not saved:
+            self.set_status("静音状态没能存进配置文件，重启后会恢复原样", "warning")
+        elif muted:
             self.set_status("这个会话已静音，只记录不自动生成", "warning")
         else:
             self.set_status("已恢复：这个会话有新消息会自动生成", "success")

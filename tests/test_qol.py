@@ -121,7 +121,6 @@ class TestWinStateSettings:
     def test_full_save_preserves_win_state(self, tmp_path, monkeypatch):
         import app.settings as settings
         monkeypatch.setattr(settings, "_CONFIG", str(tmp_path / "config.json"))
-        monkeypatch.setattr(settings, "_set_key", lambda *a: None)  # 别碰注册表
         monkeypatch.setattr(settings, "_notify_env", lambda: None)
         settings.save_win_state(10, 20, 360)
         settings.save()  # 设置页「保存设置」的全量保存

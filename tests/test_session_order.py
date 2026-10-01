@@ -55,7 +55,6 @@ class TestChatMeta:
     def test_full_save_preserves_chat_meta(self, tmp_path, monkeypatch):
         import app.settings as settings
         monkeypatch.setattr(settings, "_CONFIG", str(tmp_path / "config.json"))
-        monkeypatch.setattr(settings, "_set_key", lambda *a: None)  # 别碰注册表
         monkeypatch.setattr(settings, "_notify_env", lambda: None)
         settings.set_chat_meta("张三", ts=1000)
         settings.save()  # 设置页「保存设置」的全量保存

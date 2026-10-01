@@ -148,7 +148,7 @@ def on_debug_closed():
     """用户直接关了调试窗 = 把开关也关了，否则设置页显示开着但没窗。"""
     debug_on.clear()
     ov.set_debug_switch(False)
-    settings.save(debug_view_on=False)
+    settings.try_save(debug_view_on=False)
 
 
 def on_toggle_capture(on):
@@ -420,6 +420,7 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     uia_on.set()
     uia_child = multiprocessing.Process(target=uia_worker.run, args=(q, uia_on), daemon=True)
     uia_child.start()
+    settings.migrate_legacy_keys()  # 老版本放在用户环境变量里的明文 key → 加密存储；失败原样保留，原因在 secret_issues()
     ov = Overlay(on_fill=fill_reply, on_toggle_capture=on_toggle_capture,
                  on_target_change=on_target_change, on_toggle_debug=set_debug,
                  on_generate=generate_now, on_cancel=cancel_generate, on_reroll=reroll_reply,
@@ -439,6 +440,8 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     if not settings.has_key():
         ov.set_status("请先在设置中配置模型", "warning")
         ov.after(0, ov.open_settings)
+    if settings.secret_issues():  # 比「请先配置」更具体：比如密文解不开
+        ov.set_status("；".join(settings.secret_issues()), "warning")
     if settings.check_update() and update.parse_version(VERSION):  # 开发版没有版本号，不查也不烦源码用户
         threading.Thread(target=check_update_bg, daemon=True).start()
     ov.after(50, tick)

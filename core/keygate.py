@@ -8,7 +8,7 @@ key 和「它准备发往的接口」在同一个不可变对象里，发出前�
 Credential 只能由两个入口造：
 - stored_credential：存下来的 key。它绑定的接口（config.json 的 key_bindings，只记接口不含 key）
   按 BindingState 四种状态各有一个结局：对得上放行、对不上抛 KeyRouteError、没有绑定记录（老版本存的 key）
-  临时放行（save() 换来源前会先绑上，S3 迁移）、记录读不了（配置损坏）拒发。
+  放行（S3 之后存下来的 key 都是加密并同时绑定的；只有迁移没做完、或直接从进程环境来的 key 才会在这个状态）、记录读不了（配置损坏）拒发。
 - typed_credential：用户刚在设置页里为当前所选接口敲的 key，接口就是页面上选的那个。
 """
 from __future__ import annotations
@@ -55,7 +55,7 @@ class BindingState(str, Enum):
     「没有记录」和「记录读不了」必须分开：以前两者都是 None，读不了也被当成老 key 放行。"""
     BOUND_MATCH = "BOUND_MATCH"                # 绑定 == 目的地 → 发
     BOUND_MISMATCH = "BOUND_MISMATCH"          # 绑定 != 目的地 → 拒
-    LEGACY_UNBOUND = "LEGACY_UNBOUND"          # 读得了、但这把 key 没有记录（老版本存的）→ 发，临时兼容，S3 迁移
+    LEGACY_UNBOUND = "LEGACY_UNBOUND"          # 读得了、但这把 key 没有记录（老版本存的）→ 发；迁移没做完（失败会报告、旧值不毁）或直接来自进程环境才会在这个状态
     BINDING_UNAVAILABLE = "BINDING_UNAVAILABLE"  # 记录读不了（配置损坏 / 设置模块加载不了）→ 拒
 
 
