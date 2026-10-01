@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QOL 包的纯逻辑：暂停倒计时、窗口位置钳制、会话陈旧/静音判定、失败重试。不 import Qt，便于单测。"""
-import time
+"""QOL 包的纯逻辑：暂停倒计时、窗口位置钳制、会话陈旧/静音判定。不 import Qt，便于单测。"""
 
 
 def fmt_remaining(seconds) -> str:
@@ -26,26 +25,6 @@ def auto_generate_allowed(title, meta_lookup) -> bool:
     """自动生成的闸：会话没静音才放行。meta_lookup(title) -> dict（chat_meta 条目的读取函数）。
     只挡自动生成；history / 未读 / 手动 ↻ 都不受影响。"""
     return not meta_lookup(title).get("muted")
-
-
-def run_with_retry(fn, should_continue, pause_s, sleep=time.sleep):
-    """两试制（6A-2）：fn() 异常后先 should_continue()（rev 未变才值得），等 pause_s 再查一次，
-    仍为真再试一次。返回 (ok, value_or_exc, attempts)：ok=True 时 value 是 fn 的返回值，
-    否则是最后一次异常；attempts 记实际跑了几次（没重试就是 1）。
-    sleep 可注入假函数：后台线程传 time.sleep（不冻 UI），测试传 lambda s: None。"""
-    try:
-        return True, fn(), 1
-    except Exception as exc:
-        first = exc
-    if not should_continue():
-        return False, first, 1
-    sleep(pause_s)
-    if not should_continue():  # 等的过程中又被取消/来了新消息，第二次也别浪费
-        return False, first, 1
-    try:
-        return True, fn(), 2
-    except Exception as exc:
-        return False, exc, 2
 
 
 def fit_rect(rect, screens):

@@ -29,6 +29,7 @@ class Request:
     rev: int  # 发出时会话的版本；新消息 / 取消让版本前进
     reply_to: str | None = None
     image: str | None = field(default=None, repr=False)  # 发出时就定好带不带图（主线程里算的），线程里不再读会话
+    plan: object = field(default=None, repr=False)  # core/route.ReplyPlan：发出时定下的路由和口径设置，线程里不再读设置
 
     @property
     def newest(self):
@@ -45,6 +46,7 @@ class RerollTicket:
     basis: Request
     msgs: tuple
     image: str | None = field(default=None, repr=False)
+    plan: object = field(default=None, repr=False)
 
 
 class Chat:
@@ -71,7 +73,7 @@ class Coordinator:
     def __init__(self):
         self._chats: dict[str, Chat] = {}
         self._gens = itertools.count(1)
-        self._queued: dict[str, tuple] = {}  # 会话 → (msgs, reply_to, image)：生成期间又来了新消息，回来后接着跑最新的
+        self._queued: dict[str, tuple] = {}  # 会话 → (msgs, reply_to, image, plan)：生成期间又来了新消息，回来后接着跑最新的
         self._open: dict[str, str] = {}  # App → 它当前开着的会话
         self.fg_app = None  # 最近一次在前台的聊天 App；界面只跟它
 
@@ -134,17 +136,17 @@ class Coordinator:
         return chat
 
     # ---- 生成
-    def begin(self, title, msgs, reply_to=None, image=None, force=False):
+    def begin(self, title, msgs, reply_to=None, image=None, force=False, plan=None):
         """要一次生成。这个会话已经有一次在跑又没被取消（且不是强制）→ 排队合并、返回 None；否则发出 Request。"""
         chat = self.chat(title)
         if chat.running and not force:
-            self._queued[title] = (tuple(msgs), reply_to, image)
+            self._queued[title] = (tuple(msgs), reply_to, image, plan)
             return None
-        return self._issue(chat, title, tuple(msgs), reply_to, image)
+        return self._issue(chat, title, tuple(msgs), reply_to, image, plan)
 
-    def _issue(self, chat, title, msgs, reply_to, image):
+    def _issue(self, chat, title, msgs, reply_to, image, plan=None):
         self._queued.pop(title, None)
-        req = Request(next(self._gens), title, msgs, chat.rev, reply_to, image)
+        req = Request(next(self._gens), title, msgs, chat.rev, reply_to, image, plan)
         chat.live = req.gen
         chat.running.add(req.gen)
         return req
@@ -160,7 +162,7 @@ class Coordinator:
             if result is not None:
                 chat.result, chat.result_req = result, req
         queued = self._queued.get(req.title)
-        if accepted and queued == (req.msgs, req.reply_to, req.image):
+        if accepted and queued == (req.msgs, req.reply_to, req.image, req.plan):
             queued = None  # 排队的和刚出结果的是同一份输入（生成期间又点了「立即生成」）：不再白跑一次
             self._queued.pop(req.title, None)
         nxt = None
@@ -189,13 +191,13 @@ class Coordinator:
         self._queued.clear()
 
     # ---- 单卡重 roll
-    def reroll_begin(self, title, index, image=None):
+    def reroll_begin(self, title, index, image=None, plan=None):
         chat = self._chats.get(title)
         result = chat.result if chat else None
         if (not chat or chat.live is not None or title in self._queued or result is None
                 or chat.result_req is None or not (0 <= index < len(result.get("candidates") or []))):
             return None
-        return RerollTicket(title, index, chat.rev, chat.result_req, tuple(chat.history), image)
+        return RerollTicket(title, index, chat.rev, chat.result_req, tuple(chat.history), image, plan)
 
     def reroll_valid(self, ticket: RerollTicket) -> bool:
         """晚到的重 roll 只在：会话没动过、显示的还是它发出时那份结果、没有新的生成在替换它。"""

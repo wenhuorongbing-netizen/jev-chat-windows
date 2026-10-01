@@ -90,26 +90,28 @@ class TestBindingOnSave:
 class TestNothingIsSentAfterASwitch:
     """走 main.analyze_bg：路由对不上时，模型调用一次都不发生，界面只收到不含 key 的错误。"""
 
-    def _run(self, monkeypatch):
+    def _run(self, monkeypatch, env):
+        monkeypatch.setenv(LLM_ENV, env[LLM_ENV])  # app 把解出来的 key 放在进程环境里，快照从那里读
         sent = []
         monkeypatch.setattr(main, "analyze_bilingual", lambda *a, **k: sent.append((a, k)) or {})
         q = queue.Queue()
         monkeypatch.setattr(main, "results", q)
         monkeypatch.setattr(main, "coord", Coordinator())
-        main.analyze_bg(main.coord.begin("t", [("her", "hi", None)]))
+        msgs = [("her", "hi", None)]
+        main.analyze_bg(main.coord.begin("t", msgs, plan=main.snapshot_plan("t", msgs)))
         return sent, q
 
     def test_blocked_after_provider_switch(self, env, monkeypatch):
-        settings.save(draft_provider_text="deepseek", llm_key_text=FAKE_KEY, bilingual_on=True)
+        settings.save(draft_provider_text="deepseek", llm_key_text=FAKE_KEY)
         settings.save(draft_provider_text="openrouter")
-        sent, q = self._run(monkeypatch)
+        sent, q = self._run(monkeypatch, env)
         assert sent == []
         kind, text, *_ = q.get_nowait()
         assert kind == "err" and FAKE_KEY not in text
 
     def test_allowed_when_route_matches(self, env, monkeypatch):
-        settings.save(draft_provider_text="deepseek", llm_key_text=FAKE_KEY, bilingual_on=True)
-        sent, q = self._run(monkeypatch)
+        settings.save(draft_provider_text="deepseek", llm_key_text=FAKE_KEY)
+        sent, q = self._run(monkeypatch, env)
         assert len(sent) == 1
         assert q.get_nowait()[0] == "ok"
 

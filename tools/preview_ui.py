@@ -5,7 +5,7 @@
     python tools/preview_ui.py --state ready --screenshot docs/ui_home.png
 
 演示设置只保存在内存，不读取真实密钥，也不修改环境变量或 config.json。
-「获取模型」按钮也走得通：两个列模型的接口都被换成了本地假列表，全程不联网。
+「获取模型」按钮也走得通：列模型的接口被换成了本地假列表，全程不联网。
 """
 from __future__ import annotations
 
@@ -82,21 +82,13 @@ _RESULT = {
     # 推荐故意放在第二项，方便检查视觉排序和按钮对应关系。
     "best_index": 1,
     "best_reply": "可以呀，周六六点在上次那家见！我也有点馋了 😋",
-    "scores": [0.21, 0.66, 0.13],
-    "answers": {
-        "literal_question": {"type": "noul", "noul": 0.98},
-        "true_intent": {"type": "choice", "choice": "casual_chat"},
-        "danger_level": {"type": "score", "score": 0},
-        "should_reply_now": {"type": "noul", "noul": 0.96},
-        "best_action": {"type": "choice", "choice": "make_plan"},
-        "she_needs": {"type": "choice", "choice": "action"},
-        "tension_resolved": {"type": "noul", "noul": 0.99},
-        "best_reply": {
-            "type": "choice", "choice": "reply_b",
-            "probabilities": {"reply_a": 0.21, "reply_b": 0.66, "reply_c": 0.13},
-        },
-    },
+    "scores": [],
+    "answers": {},
     "usage": {},
+    "lang": "中文",
+    "translation": "",
+    "glosses": [],
+    "analysis": "对方在约周六晚饭，时间地点都定了，直接答应并确认就行。",
     "reply_to": "阿杰",  # 跟 _SENDERS[0] 一致，让「回复给 …」那行在演示里看得见
 }
 
@@ -110,18 +102,16 @@ def main() -> int:
     args = parser.parse_args()
     target = Path(args.screenshot).expanduser() if args.screenshot else None
 
-    # 演示里：判断走 OpenRouter，起草走 DeepSeek 官网；全程就两把 key，都当「已配置」
+    # 演示里：起草走 DeepSeek 官网，key 当「已配置」
     configured = "" if args.state == "setup" else "demo-key"
     demo_settings = {"relationship": "friends", "context": 10,
-                     "jev_key": configured, "llm_key": configured,
-                     "jev_provider": "openrouter", "jev_model": "typesafe/jev-1.13",
+                     "llm_key": configured,
                      "draft_provider": "deepseek", "draft_model": "deepseek-flash",
                      "draft_base_url": "", "reply_target": True,
                      "style": "话少，基本不用标点，急了才发感叹号", "thinking": False,
                      "check_update": True, "debug_view": args.state == "debug"}
 
-    def save_demo_settings(relationship_text=None, context_n=None, *, jev_provider_text=None,
-                           jev_key_text=None, jev_model_text=None, draft_provider_text=None,
+    def save_demo_settings(relationship_text=None, context_n=None, *, draft_provider_text=None,
                            llm_key_text=None, draft_model_text=None, draft_base_url_text=None,
                            reply_target_on=None, style_text=None, thinking_on=None,
                            check_update_on=None, debug_view_on=None):
@@ -129,23 +119,16 @@ def main() -> int:
             demo_settings["relationship"] = relationship_text
         if context_n is not None:
             demo_settings["context"] = context_n
-        for name, value in (("jev_provider", jev_provider_text), ("jev_model", jev_model_text),
-                            ("draft_provider", draft_provider_text), ("draft_model", draft_model_text),
+        for name, value in (("draft_provider", draft_provider_text), ("draft_model", draft_model_text),
                             ("draft_base_url", draft_base_url_text), ("style", style_text)):
             if value is not None:
                 demo_settings[name] = value
-        for name, key in (("jev_key", jev_key_text), ("llm_key", llm_key_text)):
-            if key:
-                demo_settings[name] = key
+        if llm_key_text:
+            demo_settings["llm_key"] = llm_key_text
         for name, value in (("reply_target", reply_target_on), ("thinking", thinking_on),
                             ("check_update", check_update_on), ("debug_view", debug_view_on)):
             if value is not None:
                 demo_settings[name] = bool(value)
-
-    def fake_jev_models(provider, key, timeout=10):
-        """演示不联网：给一小撮假模型，让「获取模型」按钮在本地也走得通。"""
-        return (["typesafe/jev-1.13"] if provider == "openrouter"
-                else ["jev-1.13.0", "jev-latest", "jev-preview"])
 
     def fake_llm_models(protocol, base_url, api_key, timeout=10):
         return {"anthropic": ["claude-demo-4", "claude-demo-4-mini"],
@@ -153,18 +136,12 @@ def main() -> int:
             protocol, ["deepseek-flash", "deepseek-reasoner", "demo-model-a", "demo-model-b"])
 
     # 在创建 Overlay 前替换设置接口，整个事件循环期间都保持隔离。
-    with patch("core.jev_client.list_models", fake_jev_models), patch(
-            "core.llm.list_models", fake_llm_models), patch.multiple(
+    with patch("core.llm.list_models", fake_llm_models), patch.multiple(
         settings,
-        has_key=lambda: bool(demo_settings["jev_key"]),
-        has_jev_key=lambda: bool(demo_settings["jev_key"]),
         has_llm_key=lambda: bool(demo_settings["llm_key"]),
-        jev_key=lambda: demo_settings["jev_key"],
         llm_key=lambda: demo_settings["llm_key"],
         relationship=lambda: demo_settings["relationship"],
         context=lambda: demo_settings["context"],
-        jev_provider=lambda: demo_settings["jev_provider"],
-        jev_model=lambda: demo_settings["jev_model"],
         draft_provider=lambda: demo_settings["draft_provider"],
         draft_model=lambda: demo_settings["draft_model"],
         draft_base_url=lambda: demo_settings["draft_base_url"],

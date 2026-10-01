@@ -12,6 +12,7 @@ import pytest
 
 from app import settings
 from core import draft, jev_client, keygate, llm
+from core.route import snapshot_route
 from core.keygate import Credential, KeyRouteError, destination_of, release
 from core.providers import JEV_ENV, LLM_ENV, draft_route, jev_route
 
@@ -93,8 +94,9 @@ class TestCredential:
             if spec.base:
                 assert destination_of(spec.protocol, spec.base) == draft_route(provider)
         assert destination_of("gemini", "") == draft_route("gemini")
-        assert jev_client.jev_destination("openrouter") == jev_route("openrouter")
-        assert jev_client.jev_destination("typesafe") == jev_route("typesafe")
+        # 旧版判断那把 key 的绑定记录还能被读懂（迁移用）：两家的固定地址跟 destination_of 同一口径
+        assert jev_route("openrouter") == destination_of("openai", "https://openrouter.ai/api/v1")
+        assert jev_route("typesafe") == "https://api.typesafe.ai"
 
 
 class TestLowLevelClientsRefuseWithoutTheGuard:
@@ -125,68 +127,55 @@ class TestLowLevelClientsRefuseWithoutTheGuard:
 
     def test_draft_candidates_bound_elsewhere_sends_nothing(self, cfg, transport):
         cfg(LLM_ENV, draft_route("deepseek"))
+        route = snapshot_route("custom_openai", "https://evil.example/v1", "m")
+        assert route.credential is None  # 快照这一步就核对过了：对不上就没有 credential
         with pytest.raises(KeyRouteError) as e:
-            draft.draft_candidates(MSGS, "friends", provider="custom_openai", base_url="https://evil.example/v1")
+            draft.draft_candidates(MSGS, "friends", route)
         assert FAKE_KEY not in str(e.value)
         assert transport.built == []
 
     def test_draft_candidates_provider_switched_sends_nothing(self, cfg, transport):
         cfg(LLM_ENV, draft_route("deepseek"))
         with pytest.raises(KeyRouteError):
-            draft.draft_candidates(MSGS, "friends", provider="openrouter")
+            draft.draft_candidates(MSGS, "friends", snapshot_route("openrouter", None, None))
         assert transport.built == []
 
     def test_draft_bilingual_bound_elsewhere_sends_nothing(self, cfg, transport):
         cfg(LLM_ENV, draft_route("deepseek"))
         with pytest.raises(KeyRouteError):
             draft.draft_bilingual([("her", "Wie geht's?", None)], "friends",
-                                  provider="custom_openai", base_url="https://evil.example/v1")
+                                  snapshot_route("custom_openai", "https://evil.example/v1", "m"))
         assert transport.built == []
 
     def test_draft_bilingual_is_not_swallowed_by_the_image_fallback(self, cfg, transport):
         """带图失败会去掉图重发；KeyRouteError 不能被这条重试吃掉。"""
         cfg(LLM_ENV, draft_route("deepseek"))
         with pytest.raises(KeyRouteError):
-            draft.draft_bilingual([("her", "Wie geht's?", None)], "friends", provider="openrouter",
-                                  image="AAAA")
+            draft.draft_bilingual([("her", "Wie geht's?", None)], "friends",
+                                  snapshot_route("openrouter", None, None), image="AAAA")
         assert transport.built == []
 
     def test_draft_to_the_bound_origin_goes_through(self, cfg, transport):
         cfg(LLM_ENV, draft_route("deepseek"))
-        out = draft.draft_candidates(MSGS, "friends", provider="deepseek")
+        out = draft.draft_candidates(MSGS, "friends", snapshot_route("deepseek", None, None))
         assert out == ["甲", "乙", "丙"]
         assert transport.built[0]["api_key"] == FAKE_KEY
         assert transport.built[0]["base_url"] == "https://api.deepseek.com"
 
     def test_an_unbound_key_sends_nothing_even_on_the_route_it_was_meant_for(self, cfg, transport):
-        with pytest.raises(KeyRouteError):  # 没有绑定记录 = 证明不了该发往哪（S3.1 起不再放行）
-            draft.draft_candidates(MSGS, "friends", provider="deepseek")
+        route = snapshot_route("deepseek", None, None)
+        assert route.credential is None  # 没有绑定记录 = 证明不了该发往哪（S3.1 起不再放行）
+        with pytest.raises(KeyRouteError):
+            draft.draft_candidates(MSGS, "friends", route)
         assert transport.built == []
 
-    def test_jev_ask_bound_to_the_other_source_sends_nothing(self, cfg, monkeypatch):
-        cfg(JEV_ENV, jev_route("typesafe"))
+    def test_models_listing_with_a_foreign_credential_sends_nothing(self, monkeypatch):
         opened = []
-        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: opened.append(a))
+        monkeypatch.setattr(urllib.request.OpenerDirector, "open", lambda *a, **k: opened.append(a))
         with pytest.raises(KeyRouteError):
-            jev_client.ask({"chat": {}}, {}, provider="openrouter")
-        assert opened == []
-
-    def test_jev_ask_typesafe_bound_to_openrouter_never_builds_the_sdk_client(self, cfg, monkeypatch):
-        import typesafe_sdk
-        cfg(JEV_ENV, jev_route("openrouter"))
-        built = []
-        monkeypatch.setattr(typesafe_sdk, "TypeSafeClient", lambda **kw: built.append(kw))
+            llm.fetch_models_json("openai", "https://openrouter.ai/api/v1", Credential(FAKE_KEY, "https://api.typesafe.ai"))
         with pytest.raises(KeyRouteError):
-            jev_client.ask({"chat": {}}, {}, provider="typesafe")
-        assert built == []
-
-    def test_jev_list_models_with_a_foreign_credential_sends_nothing(self, monkeypatch):
-        opened = []
-        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: opened.append(a))
-        with pytest.raises(KeyRouteError):
-            jev_client.list_models("openrouter", Credential(FAKE_KEY, "https://api.typesafe.ai"))
-        with pytest.raises(KeyRouteError):
-            jev_client.list_models("openrouter", FAKE_KEY)
+            llm.fetch_models_json("openai", "https://openrouter.ai/api/v1", FAKE_KEY)
         assert opened == []
 
 
@@ -227,39 +216,68 @@ class TestNoRawProviderErrorBody:
             llm.chat("openai", "https://api.deepseek.com", cred, "m", "S", ["U"])
         assert "密钥被拒" in str(e.value)
 
-    def test_openrouter_http_error_body_is_not_read_into_the_message(self, cfg, monkeypatch):
-        cfg(JEV_ENV, jev_route("openrouter"))
+    def test_models_http_error_body_is_not_read_into_the_message(self, monkeypatch):
         body = f'{{"error":{{"message":"{CHAT_MARKER} {FAKE_KEY}"}}}}'.encode("utf-8")
 
-        def urlopen(req, timeout=None):
+        def opener(self, req, data=None, timeout=None):
             raise urllib.error.HTTPError(req.full_url, 422, "Unprocessable", {}, io.BytesIO(body))
-        monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(urllib.request.OpenerDirector, "open", opener)
+        cred = Credential(FAKE_KEY, destination_of("openai", "https://openrouter.ai/api/v1"))
         with pytest.raises(jev_client.JevError) as e:
-            jev_client.ask({"chat": {}}, {}, provider="openrouter")
+            llm.fetch_models_json("openai", "https://openrouter.ai/api/v1", cred)
         self._assert_clean(str(e.value), "CHATMARKER", "老王", FAKE_KEY)
         assert "HTTP 422" in str(e.value)
 
-    def test_openrouter_key_probe_error_body_is_not_read(self, monkeypatch):
-        body = f'{{"error":"{CHAT_MARKER}"}}'.encode("utf-8")
-
-        def urlopen(req, timeout=None):
-            raise urllib.error.HTTPError(req.full_url, 400, "Bad", {}, io.BytesIO(body))
-        monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-        cred = Credential(FAKE_KEY, jev_route("openrouter"))
-        with pytest.raises(jev_client.JevError) as e:
-            jev_client.list_models("openrouter", cred)
-        self._assert_clean(str(e.value), "CHATMARKER", "老王")
-
-    def test_connection_failure_reports_the_type_only(self, cfg, monkeypatch):
-        cfg(JEV_ENV, jev_route("openrouter"))
-
-        def urlopen(req, timeout=None):
+    def test_models_connection_failure_reports_the_type_only(self, monkeypatch):
+        def opener(self, req, data=None, timeout=None):
             raise urllib.error.URLError(OSError(f"cannot reach {CHAT_MARKER} {FAKE_KEY}"))
-        monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-        monkeypatch.setattr(jev_client.time, "sleep", lambda s: None)
+        monkeypatch.setattr(urllib.request.OpenerDirector, "open", opener)
+        cred = Credential(FAKE_KEY, destination_of("openai", "https://openrouter.ai/api/v1"))
         with pytest.raises(jev_client.JevError) as e:
-            jev_client.ask({"chat": {}}, {}, provider="openrouter")
+            llm.fetch_models_json("openai", "https://openrouter.ai/api/v1", cred)
         self._assert_clean(str(e.value), "CHATMARKER", "老王", FAKE_KEY)
+
+    def test_models_request_does_not_follow_a_redirect_with_the_key(self):
+        """服务端 302 到别处：Authorization 头不能跟着走。"""
+        import http.server
+        import threading
+
+        seen = {"evil": 0}
+
+        class Evil(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["evil"] += 1
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *a):
+                pass
+
+        evil = http.server.HTTPServer(("127.0.0.1", 0), Evil)
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{evil.server_port}/models")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        front = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
+        threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (evil, front)]
+        for t in threads:
+            t.start()
+        try:
+            base = f"http://127.0.0.1:{front.server_port}/v1"
+            with pytest.raises(jev_client.JevError):
+                llm.fetch_models_json("openai", base, Credential(FAKE_KEY, destination_of("openai", base)))
+            assert seen["evil"] == 0
+        finally:
+            for s in (evil, front):
+                s.shutdown()
+                s.server_close()
 
     def test_a_model_reply_that_is_not_json_is_not_echoed(self):
         with pytest.raises(jev_client.JevError) as e:
@@ -272,10 +290,10 @@ class TestNoRawProviderErrorBody:
 
     def test_unparseable_draft_reply_is_not_echoed(self):
         with pytest.raises(jev_client.JevError) as e:
-            draft._parse_candidates("")  # 解析不出任何候选
+            draft._parse_chinese("")  # 解析不出任何候选
         self._assert_clean(str(e.value), "CHATMARKER", "老王")
         with pytest.raises(jev_client.JevError) as e:
-            draft._parse_three(CHAT_MARKER)  # 只有一条：strict 版抛，消息里不能带原文
+            draft._parse_chinese(CHAT_MARKER)  # 不是 JSON：抛，消息里不能带原文
         self._assert_clean(str(e.value), "CHATMARKER", "老王")
 
 

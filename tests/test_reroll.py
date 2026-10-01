@@ -9,6 +9,11 @@ from PySide6.QtWidgets import QApplication
 from app.overlay import Overlay
 from core import draft, engine
 from core.keygate import Credential
+from core.route import ReplyPlan, ReplyRoute
+
+_BASE = "https://api.deepseek.com"
+ROUTE = ReplyRoute("deepseek", "openai", _BASE, "m", _BASE, Credential("", _BASE))
+PLAN = ReplyPlan(ROUTE, "friends", 10, "", False)
 
 app = QApplication.instance() or QApplication([])
 
@@ -39,14 +44,14 @@ class TestRerollEngine:
     def test_chinese_path_picks_first_fresh_and_passes_avoid(self, monkeypatch):
         calls = []
 
-        def fake_draft(messages, relationship, **kw):
+        def fake_draft(messages, relationship, route, **kw):
             calls.append(kw)
             return ["旧甲", "新乙", "新丙"]
 
         monkeypatch.setattr(engine, "draft_candidates", fake_draft)
         monkeypatch.setattr(engine, "draft_bilingual",
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("中文不该走这条")))
-        text, gloss = engine.reroll_candidate([("her", "在吗")], "friends", "中文", ["旧甲", "旧乙"])
+        text, gloss = engine.reroll_candidate([("her", "在吗")], PLAN, "中文", ["旧甲", "旧乙"])
         assert (text, gloss) == ("新乙", "")
         assert calls[0]["avoid"] == ["旧甲", "旧乙"], "existing 透传给起草层避免重复"
 
@@ -55,19 +60,19 @@ class TestRerollEngine:
             "candidates": ["旧A", "NeuB", "NeuC"], "glosses": ["旧", "新B", "新C"], "lang": "德语"})
         monkeypatch.setattr(engine, "draft_candidates",
                             lambda *a, **k: (_ for _ in ()).throw(AssertionError("外语不该走这条")))
-        text, gloss = engine.reroll_candidate([("her", "Hallo")], "friends", "德语", ["旧A"])
+        text, gloss = engine.reroll_candidate([("her", "Hallo")], PLAN, "德语", ["旧A"])
         assert (text, gloss) == ("NeuB", "新B"), "gloss 与正文同索引取走"
 
     def test_all_duplicate_falls_back_to_first(self, monkeypatch):
         monkeypatch.setattr(engine, "draft_candidates", lambda *a, **k: ["旧甲", "旧甲改"])
         # 「旧甲改」与「旧甲」ratio 0.8 ≥ 0.75 → 也重复 → 兜底第一条（仍返回）
-        text, _ = engine.reroll_candidate([("her", "在吗")], "friends", "中文", ["旧甲"])
+        text, _ = engine.reroll_candidate([("her", "在吗")], PLAN, "中文", ["旧甲"])
         assert text == "旧甲"
 
     def test_empty_chinese_result_raises(self, monkeypatch):
         monkeypatch.setattr(engine, "draft_candidates", lambda *a, **k: [])
         with pytest.raises(Exception):
-            engine.reroll_candidate([("her", "在吗")], "friends", "中文", ["x"])
+            engine.reroll_candidate([("her", "在吗")], PLAN, "中文", ["x"])
 
 
 # ---------------------------------------------------------------- draft 的 avoid 提示词纪律
@@ -89,26 +94,25 @@ class TestDraftAvoid:
             return content
 
         monkeypatch.setattr(draft, "chat", fake_chat)
-        monkeypatch.setattr(draft, "credential_for", lambda env, dest: Credential("", dest))
         return captured
 
     def test_avoid_none_prompt_byte_identical(self, monkeypatch):
         captured = self._capture(monkeypatch, '{"analysis": "x", "replies": ["甲", "乙", "丙"]}')
-        draft.draft_candidates(self.MSGS, "friends")
+        draft.draft_candidates(self.MSGS, "friends", ROUTE)
         assert captured["turns"][0] == self.SNAPSHOT, "avoid=None 时提示词与现状逐字一致"
 
     def test_avoid_appends_exclusion_line(self, monkeypatch):
         captured = self._capture(monkeypatch, '{"analysis": "x", "replies": ["甲", "乙", "丙"]}')
-        draft.draft_candidates(self.MSGS, "friends", avoid=["甲", "乙"])
+        draft.draft_candidates(self.MSGS, "friends", ROUTE, avoid=["甲", "乙"])
         assert captured["turns"][0] == self.SNAPSHOT + "\n\n以下几条已经出现过了，换一个角度，别重复：甲；乙"
 
     def test_bilingual_avoid_none_byte_identical(self, monkeypatch):
         captured = self._capture(monkeypatch, '{"lang": "德语", "translation": "x", "replies": '
                                               '[{"text": "A", "zh": "甲"}, {"text": "B", "zh": "乙"},'
                                               ' {"text": "C", "zh": "丙"}]}')
-        draft.draft_bilingual(self.BILINGUAL_MSGS, "friends")
+        draft.draft_bilingual(self.BILINGUAL_MSGS, "friends", ROUTE)
         assert captured["turns"][0] == self.BILINGUAL_SNAPSHOT, "avoid=None 时提示词与现状逐字一致"
-        draft.draft_bilingual(self.BILINGUAL_MSGS, "friends", avoid=["A"])
+        draft.draft_bilingual(self.BILINGUAL_MSGS, "friends", ROUTE, avoid=["A"])
         assert captured["turns"][0] == self.BILINGUAL_SNAPSHOT + "\n\n以下几条已经出现过了，换一个角度，别重复：A"
 
 

@@ -151,3 +151,138 @@ class TestMalformedBindingRecord:
         monkeypatch.setattr(settings, "_CONFIG", str(cfg))
         cfg.write_text(json.dumps({"key_bindings": {JEV_ENV: None}}), encoding="utf-8")
         assert keygate.binding_state(JEV_ENV, "https://a.example")[0] is BindingState.LEGACY_UNBOUND
+
+
+# ---------------------------------------------------------------- S4：能力 / 重试 / 回复结局
+from core import capability, llm, retry  # noqa: E402
+from core.jev_client import JevError  # noqa: E402
+from core.keygate import Credential  # noqa: E402
+from core.route import ReplyRoute  # noqa: E402
+
+
+def _route(base, model, key="k"):
+    dest = _origin(base) or ""
+    return ReplyRoute("p", "openai", base, model, dest, Credential(key, dest) if key else None)
+
+
+class TestCapabilityContract:
+    DOC = _load("capability.json")
+
+    def test_the_evidence_list_is_exactly_the_contract(self):
+        assert [capability.PROVIDER_DECLARED, capability.FIELD_ABSENT, capability.MODEL_NOT_LISTED,
+                capability.UNKNOWN_SHAPE, capability.FETCH_FAILED, capability.OWNER_DISABLED] == self.DOC["evidence"]
+
+    @pytest.mark.parametrize("case", DOC["parse_cases"], ids=lambda c: c["name"])
+    def test_parse(self, case):
+        cap = capability.parse_image(case["base"], case["body"], case["model"])
+        assert (cap.state, cap.evidence) == (case["expect"]["state"], case["expect"]["evidence"])
+
+    @pytest.mark.parametrize("case", DOC["fetch_cases"], ids=lambda c: c["name"])
+    def test_fetch(self, case):
+        outcome = case["outcome"]
+
+        def fetch(route):
+            if outcome.startswith("http_"):
+                raise JevError("x", int(outcome[5:]))
+            raise JevError("x", kind=outcome) if outcome in ("timeout", "transport") else AssertionError("never sent")
+
+        caps = capability.ModelCapabilities(fetch)
+        cap = caps.image_input(_route("https://api.example.com/v1", "m", key=None if outcome == "no_key" else "k"))
+        assert (cap.state, cap.evidence) == (case["expect"]["state"], case["expect"]["evidence"])
+        assert case["expect"]["cached"] is False
+        assert caps._cache == {}
+
+    @pytest.mark.parametrize("case", DOC["cache_key_cases"], ids=lambda c: c["name"])
+    def test_cache_key(self, case):
+        a = capability.cache_key(case["a"]["base"], case["a"]["model"])
+        b = capability.cache_key(case["b"]["base"], case["b"]["model"])
+        assert (a is not None and a == b) is case["same"]
+
+    @pytest.mark.parametrize("case", DOC["image_decision_cases"], ids=lambda c: c["name"])
+    def test_image_decision(self, case):
+        d = capability.decide_image(case["capability"], case["owner_enabled"], case["client_can_attach"])
+        assert {"effective": d.effective, "attach": d.attach, "fall_back_to_text": d.fall_back_to_text,
+                "reason": d.reason} == case["expect"]
+
+
+class TestRetryContract:
+    DOC = _load("retry_policy.json")
+
+    def test_the_caps_are_exactly_the_contract(self):
+        assert retry.MAX_ATTEMPTS == {k: v["max_attempts"] for k, v in self.DOC["retry"].items()}
+        assert sorted(retry.MAX_ATTEMPTS) == sorted(self.DOC["classes"])
+        assert {k for k, v in self.DOC["retry"].items() if v["retry"]} == {
+            k for k, n in retry.MAX_ATTEMPTS.items() if n > 1}
+
+    @pytest.mark.parametrize("case", DOC["status_cases"], ids=lambda c: str(c["status"]))
+    def test_status(self, case):
+        assert retry.kind_of_status(case["status"]) == case["class"]
+        assert JevError("x", case["status"]).kind == case["class"]
+
+    @staticmethod
+    def _failure(code):
+        if code.startswith("http_"):
+            return JevError("x", int(code[5:]))
+        if code == "route_mismatch":
+            return KeyRouteError("x")
+        if code == "invalid":
+            return draft.invalid_response("x")
+        return JevError("x", kind=code)
+
+    @pytest.mark.parametrize("case", DOC["failure_cases"], ids=lambda c: c["failure"])
+    def test_failure(self, case):
+        assert retry.kind_of(self._failure(case["failure"])) == case["class"]
+
+    @pytest.mark.parametrize("case", DOC["flow_cases"], ids=lambda c: c["name"])
+    def test_flow(self, case):
+        live = list(case["live"])
+        seen = {"calls": 0, "pauses": 0}
+
+        def attempt(n):
+            seen["calls"] += 1
+            code = case["attempts"][n - 1]
+            if code != "ok":
+                raise self._failure(code)
+            return "ok"
+
+        def is_live():
+            return live.pop(0) if live else True
+
+        def pause(_):
+            seen["pauses"] += 1
+
+        try:
+            outcome = retry.run(attempt, is_live, pause)
+        except Exception as exc:
+            outcome = retry.kind_of(exc)
+        assert {"calls": seen["calls"], "outcome": outcome, "pauses": seen["pauses"]} == case["expect"]
+
+
+class TestReplyOutcomeContract:
+    DOC = _load("reply_outcome.json")
+
+    def test_the_failure_texts_are_exactly_the_contract(self):
+        assert self.DOC["errors"]["refused"] == llm.REFUSED
+        assert {k: v for k, v in self.DOC["errors"].items() if k != "refused"} == {
+            "no_json": "模型没有返回 JSON", "bad_json": "模型返回的 JSON 无法解析",
+            "no_replies": "模型没有给出候选回复"}
+
+    @pytest.mark.parametrize("case", DOC["cases"], ids=lambda c: c["name"])
+    def test_case(self, case):
+        env = case["envelope"]
+
+        def go():
+            return draft._parse_bilingual(llm.envelope_text(env.get("content"), env.get("refusal"),
+                                                            env.get("finish_reason")))
+
+        if "error" in case:
+            with pytest.raises(JevError) as e:
+                go()
+            assert str(e.value) == self.DOC["errors"][case["error"]]
+            assert e.value.kind == "invalid_response"
+            if "must_not_leak" in case:
+                assert case["must_not_leak"] not in str(e.value)
+            return
+        got = go()
+        for key, want in case["expect"].items():
+            assert got[key] == want, key

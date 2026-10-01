@@ -1,161 +1,68 @@
 # -*- coding: utf-8 -*-
-"""整条链的唯一入口：对话 → Jev 判断 → 带着判断起草 3 条 → Jev 排序 → 结构化结果。
+"""整条链的唯一入口：对话 → 一次起草调用 → 结构化结果（候选 + 中文对照 + 分析）。
 
-平台无关。SSE 消费者、悬浮窗、命令行 demo 都只调 analyze()。
+平台无关。悬浮窗只调 analyze_bilingual / reroll_candidate；早先的 Jev 判断→起草→排序三段式在 S4 退役了，
+回复只走起草这一条路。每次调用都拿一份 ReplyPlan 快照（core/route）：路由和口径设置都在发起时定好，这里不读任何设置。
 """
 from __future__ import annotations
 
 try:
     from .draft import _similar, draft_bilingual, draft_candidates, her_latest, is_chinese
-    from .jev_client import JevError, ask
-    from .questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
+    from .jev_client import invalid_response
+    from .route import ReplyPlan
 except ImportError:
     from draft import _similar, draft_bilingual, draft_candidates, her_latest, is_chinese
-    from jev_client import JevError, ask
-    from questions import JUDGE_QUESTIONS, build_rank_question, build_state, guidance_text
-
-_REPLY_IDX = {"reply_a": 0, "reply_b": 1, "reply_c": 2}
+    from jev_client import invalid_response
+    from route import ReplyPlan
 
 
-def _add_usage(total: dict, one: dict | None) -> None:
-    """两次 Jev 调用的 usage 相加（tokens、cost）；非数字的字段后来的盖掉前面的。"""
-    for k, v in (one or {}).items():
-        total[k] = total.get(k, 0) + v if isinstance(v, (int, float)) else v
-
-
-def analyze(messages: list, relationship: str, model: str | None = None,
-            timeout: float = 30, context: int = 10, provider: str = "deepseek",
-            base_url: str | None = None, reply_to: str | None = None, style: str = "",
-            thinking: bool = False, jev_provider: str = "openrouter",
-            jev_model: str | None = None) -> dict:
-    """messages: [(from, text)] from ∈ {her, me}，最新一条在最后；
-    群聊里可以带第三项 name（说这句话的人），单聊不带。
-    context: 起草和判断各看最近多少条消息（用户设置里的「参考上下文」）。
-    provider: 起草走哪家（core.providers.DRAFT_PROVIDERS），base_url 只有自定义来源要传。
-    jev_provider / jev_model: 判断和排序走哪家、哪个模型（core.providers.JEV_PROVIDERS）。
-    reply_to: 群聊里指定回复给谁；None = 正常回复。
-    style: 用户自己描述的说话风格，只影响起草。
-    thinking: 起草时是否开思考模式，只影响起草，默认关。
-    model / jev_model = None 用该来源的默认模型。
-
-    返回 {candidates, best_index, best_reply, scores, answers, usage, reply_to}。
-    scores 是每条候选的胜出概率（0~1），取自 best_reply.probabilities，取不到记 0.0。
-    只有对方最新说话时才有意义调它——是不是该触发由调用方判断（看 latest_from）。
-
-    三段式（issue #4）：先让 Jev 答 7 道判断题，把判断当小抄喂给起草，最后 Jev 只排序。
-    判断那次挂了就退回老路：盲起草 + 判断和排序一次问完，行为跟以前一样。usage 是两次之和。
-    """
-    state = build_state(messages, relationship, keep=context, reply_to=reply_to)
-    usage: dict = {}
-    answers: dict = {}
-    judged = False
-    try:
-        first = ask(state, dict(JUDGE_QUESTIONS), timeout=timeout,
-                    provider=jev_provider, model=jev_model)
-        answers = first.get("answers") or {}
-        _add_usage(usage, first.get("usage"))
-        judged = True
-    except JevError:
-        pass  # 退回盲起草 + 老的一次合问；错误不打日志（里面可能带请求内容）
-
-    candidates = draft_candidates(messages, relationship, provider=provider, model=model,
-                                  base_url=base_url, timeout=timeout, keep=context,
-                                  reply_to=reply_to, style=style, thinking=thinking,
-                                  guidance=guidance_text(answers) if judged else None)
-    if not candidates:  # 注入过滤可以把起草结果全扔掉；接着取 [0] 会 IndexError
-        raise JevError("起草结果没有可用候选回复")
-
-    questions = {} if judged else dict(JUDGE_QUESTIONS)
-    if len(candidates) >= 2:  # 起草只给了 1 条就没什么可排的，判断题照问
-        questions.update(build_rank_question(candidates))
-    if questions:
-        try:
-            second = ask(state, questions, timeout=timeout,
-                         provider=jev_provider, model=jev_model)
-        except JevError:
-            if not judged:  # 老路只有这一次调用，挂了就是挂了
-                raise
-            second = {}  # 判断还在，只是没排上序：下面按第一条推荐
-        answers = {**answers, **(second.get("answers") or {})}
-        _add_usage(usage, second.get("usage"))
-
-    best_key = (answers.get("best_reply") or {}).get("choice")
-    best_index = _REPLY_IDX.get(best_key, 0)  # 解析不出就退第一条
-    if best_index >= len(candidates):
-        best_index = 0
-
-    probabilities = (answers.get("best_reply") or {}).get("probabilities") or {}
-    scores = [0.0, 0.0, 0.0]
-    for key, idx in _REPLY_IDX.items():
-        try:
-            scores[idx] = float(probabilities.get(key, 0.0))
-        except (TypeError, ValueError):
-            scores[idx] = 0.0  # 脏数据一律按 0 处理
-
-    return {
-        "candidates": candidates,
-        "best_index": best_index,
-        "best_reply": candidates[best_index],
-        "scores": scores,
-        "answers": answers,
-        "usage": usage,
-        "reply_to": reply_to,
-    }
-
-
-
-
-def analyze_bilingual(messages: list, relationship: str, model: str | None = None,
-                      timeout: float = 30, context: int = 10, provider: str = "deepseek",
-                      base_url: str | None = None, reply_to: str | None = None, style: str = "",
-                      thinking: bool = False, image: str | None = None) -> dict:
-    """智能回复（跟随对方语言），不调 Jev，只要起草那把 key：
-    对方说中文 → 原来的中文起草（口吻规则最全），不翻译；
+def analyze_bilingual(messages: list, plan: ReplyPlan, timeout: float = 30,
+                      reply_to: str | None = None, image: str | None = None) -> dict:
+    """智能回复（跟随对方语言），只要起草那把 key：
+    对方说中文 → 中文起草（口吻规则最全），不翻译；
     对方说外语 → 一次调用拿到「语言 + 中文翻译 + 3 条同语言回复（带中文对照）」。
-    返回跟 analyze() 同形状，多 lang / translation / glosses；第一条就是推荐。"""
+    messages: [(from, text[, name])]，from ∈ {her, me}，最新一条在最后。
+    返回 {candidates, best_index, best_reply, scores, answers, usage, reply_to, analysis, lang, translation, glosses}；
+    第一条就是推荐。没有任何可用候选就抛 invalid_response，不会拿分析当回复、也不凑数。"""
     her = her_latest(messages)
     # 只发了图、没说话：没有语言可认，按中文走（图里的外文模型自己看得懂）
     if is_chinese(her) or not her.replace("[图片]", "").replace("[表情]", "").strip():
         info = {}
-        cands = draft_candidates(messages, relationship, provider=provider, model=model,
-                                 base_url=base_url, timeout=timeout, keep=context,
-                                 reply_to=reply_to, style=style, thinking=thinking, image=image,
+        cands = draft_candidates(messages, plan.relationship, plan.route, timeout=timeout, keep=plan.context,
+                                 reply_to=reply_to, style=plan.style, thinking=plan.thinking, image=image,
                                  info=info)
         if not cands:
-            raise JevError("起草结果没有可用候选回复")
+            raise invalid_response("起草结果没有可用候选回复")
         return {"candidates": cands, "best_index": 0, "best_reply": cands[0], "scores": [],
                 "answers": {}, "usage": {}, "reply_to": reply_to, "analysis": info.get("analysis", ""),
                 "lang": "中文", "translation": "", "glosses": []}
-    r = draft_bilingual(messages, relationship, provider=provider, model=model, image=image,
-                        base_url=base_url, timeout=timeout, keep=context, reply_to=reply_to,
-                        style=style, thinking=thinking)
+    r = draft_bilingual(messages, plan.relationship, plan.route, timeout=timeout, keep=plan.context,
+                        reply_to=reply_to, style=plan.style, thinking=plan.thinking, image=image)
     return {"candidates": r["candidates"], "best_index": 0, "best_reply": r["candidates"][0],
             "scores": [], "answers": {}, "usage": {}, "reply_to": reply_to,
             "lang": r["lang"] or "外语", "translation": r["translation"], "glosses": r["glosses"],
             "analysis": r.get("analysis", "")}
 
 
-def reroll_candidate(messages, relationship, lang, existing, model=None, timeout=30,
-                     context=10, provider="deepseek", base_url=None, reply_to=None,
-                     style="", thinking=False, image=None) -> tuple[str, str]:
-    """重 roll 一条候选（6B「换一条」）：走与产生这批候选相同的起草路径
+def reroll_candidate(messages, plan: ReplyPlan, lang, existing, timeout=30,
+                     reply_to=None, image=None) -> tuple[str, str]:
+    """重 roll 一条候选（「换一条」）：走与产生这批候选相同的起草路径
     （lang=="中文" → draft_candidates，否则 → draft_bilingual），existing 传给起草层避免重复。
     返回 (正文, 中文对照)：挑第一条与 existing 任何一条都不重复的（draft._similar，ratio ≥ 0.75）；
     外语路径 gloss 与正文同索引取走；都不新鲜就取第一条兜底（仍返回）。_sanitize 照旧生效。"""
     if lang == "中文":
-        cands = draft_candidates(messages, relationship, provider=provider, model=model,
-                                 base_url=base_url, timeout=timeout, keep=context,
-                                 reply_to=reply_to, style=style, thinking=thinking,
+        cands = draft_candidates(messages, plan.relationship, plan.route, timeout=timeout, keep=plan.context,
+                                 reply_to=reply_to, style=plan.style, thinking=plan.thinking,
                                  avoid=list(existing))
         if not cands:
-            raise JevError("重 roll 起草结果没有可用候选回复")
+            raise invalid_response("重 roll 起草结果没有可用候选回复")
         for cand in cands:
             if not any(_similar(cand, old) for old in existing):
                 return cand, ""
         return cands[0], ""
-    r = draft_bilingual(messages, relationship, provider=provider, model=model, image=image,
-                        base_url=base_url, timeout=timeout, keep=context, reply_to=reply_to,
-                        style=style, thinking=thinking, avoid=list(existing))
+    r = draft_bilingual(messages, plan.relationship, plan.route, timeout=timeout, keep=plan.context,
+                        reply_to=reply_to, style=plan.style, thinking=plan.thinking, image=image,
+                        avoid=list(existing))
     for cand, gloss in zip(r["candidates"], r["glosses"]):
         if not any(_similar(cand, old) for old in existing):
             return cand, gloss
@@ -163,14 +70,22 @@ def reroll_candidate(messages, relationship, lang, existing, model=None, timeout
 
 
 if __name__ == "__main__":
-    # 候选被过滤光时要抛 JevError，不能在取第一条时 IndexError。
+    # 候选被过滤光时要抛 invalid_response（JevError），不能在取第一条时 IndexError。
     from unittest.mock import patch
 
-    with patch("__main__.ask", return_value={"answers": {}, "usage": {}}), \
-         patch("__main__.draft_candidates", return_value=[]):
+    try:
+        from .jev_client import JevError
+        from .route import ReplyRoute
+    except ImportError:
+        from jev_client import JevError
+        from route import ReplyRoute
+
+    plan = ReplyPlan(ReplyRoute("deepseek", "openai", "https://api.deepseek.com", "m",
+                                "https://api.deepseek.com"), "friends", 10, "", False)
+    with patch("__main__.draft_candidates", return_value=[]):
         try:
-            analyze([("her", "hello")], "friends")
+            analyze_bilingual([("her", "你好")], plan)
             raise SystemExit("应当抛错")
         except JevError as e:
-            assert "没有可用候选" in str(e)
+            assert "没有可用候选" in str(e) and e.kind == "invalid_response"
     print("engine ok")

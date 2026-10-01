@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""6A：生成取消（↻↔✕）+ 失败自动重试一次（run_with_retry 纯函数）。"""
+"""6A：生成取消（↻↔✕）。失败重试在 core/retry（见 test_contract_v1 / test_s4_route）。"""
 from unittest import mock
 
 import pytest
@@ -7,7 +7,6 @@ from PySide6.QtWidgets import QApplication
 from qfluentwidgets import FluentIcon as FIF
 
 from app.overlay import Overlay
-from app.qol import run_with_retry
 
 app = QApplication.instance() or QApplication([])
 
@@ -20,66 +19,6 @@ def overlay():
     yield ov
     ov.win.close()
     ov.win.deleteLater()
-
-
-# ---------------------------------------------------------------- 6A-2 run_with_retry 两试制
-class TestRunWithRetry:
-    def test_success_first_try(self):
-        ok, value, attempts = run_with_retry(lambda: 42, lambda: True, 0, sleep=lambda s: None)
-        assert (ok, value, attempts) == (True, 42, 1)
-
-    def test_success_second_try(self):
-        calls = []
-
-        def fn():
-            calls.append(1)
-            if len(calls) == 1:
-                raise ValueError("boom")
-            return "ok"
-
-        ok, value, attempts = run_with_retry(fn, lambda: True, 0, sleep=lambda s: None)
-        assert (ok, value, attempts) == (True, "ok", 2)
-
-    def test_both_fail_returns_last_exception(self):
-        def fn():
-            raise ValueError("boom")
-
-        ok, value, attempts = run_with_retry(fn, lambda: True, 0, sleep=lambda s: None)
-        assert ok is False
-        assert isinstance(value, ValueError)
-        assert attempts == 2
-
-    def test_no_retry_when_should_not_continue(self):
-        calls = []
-
-        def fn():
-            calls.append(1)
-            raise ValueError("boom")
-
-        ok, value, attempts = run_with_retry(fn, lambda: False, 0, sleep=lambda s: None)
-        assert ok is False and attempts == 1
-        assert len(calls) == 1, "已被取消/来了新消息：不浪费第二次"
-
-    def test_should_continue_checked_again_after_sleep(self):
-        states = iter([True, False])  # 睡前放行，睡醒已被取消
-        calls = []
-
-        def fn():
-            calls.append(1)
-            raise ValueError("boom")
-
-        ok, value, attempts = run_with_retry(fn, lambda: next(states), 0, sleep=lambda s: None)
-        assert ok is False and attempts == 1
-        assert len(calls) == 1
-
-    def test_sleeps_between_attempts(self):
-        slept = []
-
-        def fn():
-            raise ValueError("x")
-
-        run_with_retry(fn, lambda: True, 1.5, sleep=slept.append)
-        assert slept == [1.5], "重试前等 pause_s，sleep 可注入（后台线程用 time.sleep，测试用假函数）"
 
 
 # ---------------------------------------------------------------- 6A-1 忙态 ↻↔✕

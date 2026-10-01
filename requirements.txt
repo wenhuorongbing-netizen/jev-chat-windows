@@ -7,7 +7,6 @@ pillow                        # only for the synthetic images in probe/
 
 # model SDKs: one official client per protocol, no hand-written HTTP (see core/llm.py)
 openai                        # OpenAI Chat Completions: DeepSeek, OpenRouter, Moonshot, GLM, Qwen, ...
-typesafe-sdk                  # Jev judging over TypeSafe direct (api.typesafe.ai)
 anthropic                     # Anthropic Messages
 google-genai                  # Google Gemini
 

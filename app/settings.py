@@ -19,7 +19,7 @@ import time
 from app import secretstore
 from app.secretstore import SecretError  # noqa: F401 —— 保存 key 失败时抛它，界面层从 settings 上取
 from core.keygate import KeyRouteError  # noqa: F401 —— 老名字：main / 测试从 settings 上取
-from core.providers import (CUSTOM, DRAFT_PROVIDERS, JEV_ENV, JEV_PROVIDERS, LEGACY, LLM_ENV,
+from core.providers import (CUSTOM, DRAFT_PROVIDERS, JEV_ENV, LEGACY, LLM_ENV,
                             draft_route, jev_route)
 
 _ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
@@ -28,6 +28,7 @@ _CONFIG = os.path.join(_ROOT, "config.json")
 _DEFAULT_RELATIONSHIP = "auto"  # 自动判断：让模型按聊天内容自己看关系和语气
 _DEFAULT_CONTEXT = 30  # 10 条在群聊里常常连在聊什么都看不出来
 _DEFAULT_JEV = "openrouter"
+_JEV_SOURCES = ("openrouter", "typesafe")
 _DEFAULT_DRAFT = "deepseek"
 
 _LOCK = threading.RLock()  # config.json 的「读 → 改 → 写」整段串行：界面线程和后台线程同时改设置不会互相覆盖
@@ -176,13 +177,9 @@ def style() -> str:
     return str(_read("style") or "")
 
 def jev_provider() -> str:
-    """判断模型走哪家：openrouter（默认）或 typesafe 直连。"""
+    """旧版判断来源（openrouter 默认 / typesafe）：S4 起没有发送路径，只用来读老配置里那把 key 的绑定记录。"""
     v = _read("jev_provider")
-    return v if v in JEV_PROVIDERS else _DEFAULT_JEV
-
-def jev_model() -> str:
-    """判断模型 id；空 = 用该来源的默认模型。"""
-    return str(_read("jev_model") or "") or JEV_PROVIDERS[jev_provider()].default
+    return v if v in _JEV_SOURCES else _DEFAULT_JEV
 
 def draft_provider() -> str:
     """起草走哪家（见 core/providers.DRAFT_PROVIDERS）。老配置里的 openrouter/deepseek 照样认。"""
@@ -211,11 +208,6 @@ def thinking() -> bool:
 def check_update() -> bool:
     """启动时要不要去 GitHub 查一次最新版本号：默认开，只出这一次网，设置里能关。"""
     return bool(_read("check_update", True))
-
-def bilingual() -> bool:
-    """智能回复（跟随对方语言）：对方说中文就中文回；说外语就翻成中文给你看，3 条回复用对方的语言写
-    （带中文对照），填入只填外语。开了就不调 Jev，只要起草那把 key。默认开。"""
-    return bool(_read("bilingual", True))
 
 def bilingual_lang() -> str:
     """双语模式下回复用的语言，默认德语。"""
@@ -488,24 +480,20 @@ def require_key_route(env_name: str) -> None:
         bound = bindings[env_name] or "（记录缺失）"
         raise KeyRouteError(f"接口已换成 {now}，但保存的 key 是给 {bound} 填的，没有发送。请在设置里重新填这个接口的 key。")
 
-def has_key() -> bool:
-    """界面上「配没配好」：双语模式只要起草那把，普通模式要判断那把。"""
-    return has_llm_key() if bilingual() else has_jev_key()
-
 def save(relationship_text: str | None = None, context_n: int | None = None, *,
          jev_provider_text: str | None = None, jev_key_text: str | None = None,
-         jev_model_text: str | None = None, draft_provider_text: str | None = None,
+         draft_provider_text: str | None = None,
          llm_key_text: str | None = None, draft_model_text: str | None = None,
          draft_base_url_text: str | None = None, reply_target_on: bool | None = None,
          style_text: str | None = None, thinking_on: bool | None = None,
          check_update_on: bool | None = None, debug_view_on: bool | None = None,
-         bilingual_on: bool | None = None, bilingual_lang_text: str | None = None,
+         bilingual_lang_text: str | None = None,
          dock_on: bool | None = None, read_images_on: bool | None = None,
          show_gloss_on: bool | None = None) -> None:
     """每个参数为空/None = 保留当前值。新敲的 key 加密后跟它的接口绑定、设置一起在一次原子写里落盘；
     加密失败（SecretError）或写不进去（ConfigWriteError）就什么都没保存、本进程也不用新 key，调用方必须当作没保存。"""
     with _LOCK:
-        jev = jev_provider_text if jev_provider_text in JEV_PROVIDERS else jev_provider()
+        jev = jev_provider_text if jev_provider_text in _JEV_SOURCES else jev_provider()
         draft = draft_provider_text if draft_provider_text in DRAFT_PROVIDERS else draft_provider()
         # key 跟接口绑定：这次填的 key 绑到这次保存的接口；没重填的 key 保持原来的绑定，换了来源/Base URL 就发不出去，要重填
         new_base = str(_read("draft_base_url") or "") if draft_base_url_text is None else str(draft_base_url_text).strip()
@@ -524,14 +512,13 @@ def save(relationship_text: str | None = None, context_n: int | None = None, *,
             # 关系为空 = 只改别的开关（调试视图那种单项保存），别把它写没了
             "relationship": relationship_text or relationship(), "context": n,
             "style": keep(style_text, "style"),
-            "jev_provider": jev, "jev_model": keep(jev_model_text, "jev_model"),
+            "jev_provider": jev,
             "draft_provider": draft, "draft_model": keep(draft_model_text, "draft_model"),
             "draft_base_url": keep(draft_base_url_text, "draft_base_url"),
             "reply_target": flag(reply_target_on, reply_target),
             "thinking": flag(thinking_on, thinking),
             "check_update": flag(check_update_on, check_update),
             "debug_view": flag(debug_view_on, debug_view),
-            "bilingual": flag(bilingual_on, bilingual),
             "dock": flag(dock_on, dock),
             "read_images_optin": flag(read_images_on, read_images),
             "show_gloss": flag(show_gloss_on, show_gloss),

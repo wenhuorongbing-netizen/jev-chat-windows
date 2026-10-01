@@ -1,0 +1,117 @@
+{
+  "contract": "reply_outcome",
+  "version": 1,
+  "doc": "What one reply-route round trip means, from the provider's message envelope {content, refusal, finish_reason} (each may be absent or null) to either the parsed result or one fixed failure. The payload rules are reply_parse.json's. On top: (1) a non-blank refusal, or finish_reason 'content_filter' with blank content, is the failure 'refused' and nothing else is looked at; (2) blank or null content is 'no_json'; (3) the replies are exactly the usable ones the model gave: fewer than three stay fewer, nothing is padded, copied or invented to reach three; (4) 'analysis' is read-only commentary and is never a candidate: a payload with analysis but no usable replies fails with 'no_replies'; (5) every failure is class invalid_response (retry_policy.json) with fixed text that carries nothing of the model's output.",
+  "errors": {
+    "no_json": "模型没有返回 JSON",
+    "bad_json": "模型返回的 JSON 无法解析",
+    "no_replies": "模型没有给出候选回复",
+    "refused": "模型拒绝回答这条消息"
+  },
+  "cases": [
+    {
+      "name": "normal: three replies with glosses",
+      "envelope": {"content": "{\"lang\":\"德语\",\"analysis\":\"寒暄\",\"translation\":\"你最近怎么样\",\"replies\":[{\"text\":\"Gut, danke!\",\"zh\":\"挺好，谢谢\"},{\"text\":\"Alles klar.\",\"zh\":\"都好\"},{\"text\":\"Und dir?\",\"zh\":\"你呢\"}]}", "finish_reason": "stop"},
+      "expect": {"lang": "德语", "analysis": "寒暄", "translation": "你最近怎么样", "candidates": ["Gut, danke!", "Alles klar.", "Und dir?"], "glosses": ["挺好，谢谢", "都好", "你呢"]}
+    },
+    {
+      "name": "two replies stay two",
+      "envelope": {"content": "{\"replies\":[{\"text\":\"a\",\"zh\":\"甲\"},{\"text\":\"b\",\"zh\":\"乙\"}]}", "finish_reason": "stop"},
+      "expect": {"candidates": ["a", "b"], "glosses": ["甲", "乙"]}
+    },
+    {
+      "name": "one reply stays one",
+      "envelope": {"content": "{\"replies\":[{\"text\":\"a\"}]}"},
+      "expect": {"candidates": ["a"], "glosses": [""]}
+    },
+    {
+      "name": "bare strings are replies without a gloss",
+      "envelope": {"content": "{\"replies\":[\"Ja\",\"Nein\",\"Vielleicht\"]}"},
+      "expect": {"candidates": ["Ja", "Nein", "Vielleicht"], "glosses": ["", "", ""]}
+    },
+    {
+      "name": "the gloss is separate from the fillable text",
+      "envelope": {"content": "{\"replies\":[{\"text\":\"Hallo!\",\"zh\":\"你好！\"}]}"},
+      "expect": {"candidates": ["Hallo!"], "glosses": ["你好！"]}
+    },
+    {
+      "name": "the analysis is not a candidate",
+      "envelope": {"content": "{\"analysis\":\"对方在约饭\",\"replies\":[{\"text\":\"好啊\",\"zh\":\"\"}]}"},
+      "expect": {"analysis": "对方在约饭", "candidates": ["好啊"]}
+    },
+    {
+      "name": "unknown fields at the top level and inside a reply are ignored",
+      "envelope": {"content": "{\"future\":{\"a\":1},\"replies\":[{\"text\":\"Hallo!\",\"zh\":\"你好！\",\"tone\":\"warm\"}],\"more\":[1,2]}", "finish_reason": "stop", "usage": {"tokens": 5}},
+      "expect": {"candidates": ["Hallo!"], "glosses": ["你好！"]}
+    },
+    {
+      "name": "analysis alone never becomes a reply",
+      "envelope": {"content": "{\"analysis\":\"对方在约饭\",\"translation\":\"t\"}"},
+      "error": "no_replies"
+    },
+    {
+      "name": "no usable reply",
+      "envelope": {"content": "{\"replies\":[{\"text\":\"  \"},{\"text\":null}]}"},
+      "error": "no_replies"
+    },
+    {
+      "name": "malformed JSON",
+      "envelope": {"content": "{\"replies\":[{\"text\":\"abc\"}", "finish_reason": "stop"},
+      "error": "bad_json",
+      "must_not_leak": "abc"
+    },
+    {
+      "name": "cut off by the token limit is malformed JSON, not a result",
+      "envelope": {"content": "{\"lang\":\"德语\",\"replies\":[{\"text\":\"Gut, dan}", "finish_reason": "length"},
+      "error": "bad_json",
+      "must_not_leak": "Gut"
+    },
+    {
+      "name": "plain prose, no JSON",
+      "envelope": {"content": "好的，我来回复", "finish_reason": "stop"},
+      "error": "no_json",
+      "must_not_leak": "我来回复"
+    },
+    {
+      "name": "null content",
+      "envelope": {"content": null, "finish_reason": "stop"},
+      "error": "no_json"
+    },
+    {
+      "name": "blank content",
+      "envelope": {"content": "   "},
+      "error": "no_json"
+    },
+    {
+      "name": "no content field",
+      "envelope": {},
+      "error": "no_json"
+    },
+    {
+      "name": "provider refusal field",
+      "envelope": {"content": null, "refusal": "I can't help with that. 秘密", "finish_reason": "stop"},
+      "error": "refused",
+      "must_not_leak": "秘密"
+    },
+    {
+      "name": "a refusal wins even when there is usable content",
+      "envelope": {"content": "{\"replies\":[{\"text\":\"a\"}]}", "refusal": "no"},
+      "error": "refused"
+    },
+    {
+      "name": "content filter with nothing to show",
+      "envelope": {"content": "", "finish_reason": "content_filter"},
+      "error": "refused"
+    },
+    {
+      "name": "content filter that still gave a usable payload is used",
+      "envelope": {"content": "{\"replies\":[{\"text\":\"a\"}]}", "finish_reason": "content_filter"},
+      "expect": {"candidates": ["a"]}
+    },
+    {
+      "name": "a blank refusal is no refusal",
+      "envelope": {"content": "{\"replies\":[{\"text\":\"a\"}]}", "refusal": "  "},
+      "expect": {"candidates": ["a"]}
+    }
+  ]
+}

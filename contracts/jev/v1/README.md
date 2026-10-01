@@ -11,6 +11,9 @@ boundaries. The files here are language-neutral test vectors; **each repo's own 
 | `fill_verdict.json` | may a reply be written into what is on screen now (divergences kept on purpose are marked with their platform reason) |
 | `credential_binding.json` | the four binding states of a stored key and the one outcome of each |
 | `fill_support.json` | which app fills how today (fresh-verified / copy-only; production is the truth, the file describes it) |
+| `capability.json` | can a route's model take images: four states + evidence, per-provider model-list adapters, the capability cache key, and what a request does with an image per state |
+| `retry_policy.json` | the seven failure classes (auth / rate_limited / timeout / unsupported / invalid_response / cancelled / transport), which are retried and how often, and that a stale generation never retries |
+| `reply_outcome.json` | one reply round trip from the provider's message envelope to the parsed result or one fixed failure (refusal, malformed, fewer than three, analysis never a reply) |
 
 ## Rules
 - The canonical copy lives in the Android repo (`contracts/jev/v1/`); the Windows repo carries a

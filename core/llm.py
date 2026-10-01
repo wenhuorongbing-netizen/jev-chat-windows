@@ -9,12 +9,28 @@ SDK 都在函数里 import：桌面端一次只用到其中一家，启动时没
 """
 from __future__ import annotations
 
+import urllib.error
+import urllib.request
+
 try:  # 当模块导入 / 当脚本直接跑 都能用
-    from .jev_client import JevError, _fail
+    from .jev_client import JevError, _fail, hint_for, invalid_response
     from .keygate import Credential, destination_of, release
 except ImportError:
-    from jev_client import JevError, _fail
+    from jev_client import JevError, _fail, hint_for, invalid_response
     from keygate import Credential, destination_of, release
+
+# 服务商拒绝回答：固定文案，跟 Android 一份（contracts/jev/v1/reply_outcome.json），不带模型的任何原文
+REFUSED = "模型拒绝回答这条消息"
+
+
+def envelope_text(content, refusal, finish_reason) -> str:
+    """服务商一次回答的信封 {content, refusal, finish_reason}（各项都可能缺 / 为空）→ 正文，或一个固定的失败。
+    规矩在 contracts/jev/v1/reply_outcome.json：refusal 非空白，或 content_filter 且正文是空的 = 拒绝回答，别的什么都不看；
+    其余照旧返回正文（空的留给解析器报「没有返回 JSON」）。"""
+    text = content if isinstance(content, str) else ""
+    if (isinstance(refusal, str) and refusal.strip()) or (finish_reason == "content_filter" and not text.strip()):
+        raise invalid_response(REFUSED)
+    return text
 
 # Anthropic 开思考模式时的预算：起草三句话用不上更多；max_tokens 必须比它大，下面会兜住
 _THINK_BUDGET = 2048
@@ -60,8 +76,9 @@ def _openai(base_url, api_key, model, system, user_turns, temperature, max_token
                                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image}"}}]
 
     try:
+        # max_retries=0：重试归 core/retry 管（按失败归类、有上限、过期的生成不再试），SDK 自己再悄悄重试会越过这些规矩
         client = openai.OpenAI(base_url=base_url or None, api_key=api_key,
-                               timeout=timeout, max_retries=2,
+                               timeout=timeout, max_retries=0,
                                **({"default_headers": headers} if headers else {}))
         resp = client.chat.completions.create(
             model=model,
@@ -71,7 +88,9 @@ def _openai(base_url, api_key, model, system, user_turns, temperature, max_token
             **({"extra_body": extra_body} if extra_body else {}))
     except Exception as exc:
         _fail(exc, "起草")
-    return resp.choices[0].message.content or ""
+    choice = resp.choices[0]
+    return envelope_text(choice.message.content, getattr(choice.message, "refusal", None),
+                         getattr(choice, "finish_reason", None))
 
 
 def _anthropic(base_url, api_key, model, system, user_turns, temperature, max_tokens,
@@ -85,12 +104,14 @@ def _anthropic(base_url, api_key, model, system, user_turns, temperature, max_to
         max_tokens = max(max_tokens, _THINK_BUDGET + 1024)  # max_tokens 得装得下思考 + 正文
     try:
         client = anthropic.Anthropic(base_url=base_url or None, api_key=api_key,
-                                     timeout=timeout, max_retries=2)
+                                     timeout=timeout, max_retries=0)  # 重试归 core/retry 管
         message = client.messages.create(model=model, system=system,
                                          messages=_turns(user_turns), max_tokens=max_tokens,
                                          temperature=temperature, **extra)
     except Exception as exc:
         _fail(exc, "起草")
+    if getattr(message, "stop_reason", None) == "refusal":
+        raise invalid_response(REFUSED)
     # 开了思考的话前面还有 thinking 块，只取文本块
     return "".join(b.text for b in message.content if getattr(b, "type", "") == "text")
 
@@ -132,7 +153,7 @@ def list_models(protocol: str, base_url: str | None, api_key: Credential,
 
         try:
             client = anthropic.Anthropic(base_url=base_url or None, api_key=api_key,
-                                         timeout=timeout, max_retries=1)
+                                         timeout=timeout, max_retries=0)
             ids = [m.id for m in client.models.list()]
         except Exception as exc:
             _fail(exc, "取模型列表")
@@ -148,12 +169,39 @@ def list_models(protocol: str, base_url: str | None, api_key: Credential,
 
         try:
             client = openai.OpenAI(base_url=base_url or None, api_key=api_key,
-                                   timeout=timeout, max_retries=1,
+                                   timeout=timeout, max_retries=0,
                                    **({"default_headers": headers} if headers else {}))
             ids = [m.id for m in client.models.list()]
         except Exception as exc:
             _fail(exc, "取模型列表")
     return sorted(set(ids))
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """key 只发往被核对过的那个接口：服务端让跳到别处就不跟，免得 Authorization 头跟着走。"""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def fetch_models_json(protocol: str, base_url: str | None, api_key: Credential,
+                      timeout: float = 10, headers: dict | None = None) -> str:
+    """`GET <base>/models` 的原始正文，给 core/capability 读输入类型声明用。只有 OpenAI 协议有这份声明；
+    别的协议没有适配器，抛 unsupported（调用方把它当「不知道」，不是「不支持」）。
+    api_key 同 chat()：必须是接口对得上 base_url 的 Credential。"""
+    key = release(api_key, destination_of(protocol, base_url))
+    if protocol != "openai" or not base_url:
+        raise JevError("这个协议没有可读的模型能力列表", kind="unsupported")
+    req = urllib.request.Request(base_url.strip().rstrip("/") + "/models",
+                                 headers={**(headers or {}), "Authorization": f"Bearer {key}",
+                                          "Accept": "application/json"})
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:  # 响应体不读：只用状态码 + 我们自己的提示
+        raise JevError(f"取模型列表 HTTP {exc.code}: {hint_for(exc.code)}", exc.code) from None
+    except Exception as exc:
+        _fail(exc, "取模型列表")
 
 
 if __name__ == "__main__":
@@ -206,7 +254,7 @@ if __name__ == "__main__":
                temperature=1.2, max_tokens=400, extra_body={"thinking": {"type": "disabled"}})
     assert out == '["甲","乙","丙"]'
     assert seen["openai.init"]["base_url"] == "https://api.deepseek.com"
-    assert seen["openai.init"]["api_key"] == "sk-ds" and seen["openai.init"]["max_retries"] == 2
+    assert seen["openai.init"]["api_key"] == "sk-ds" and seen["openai.init"]["max_retries"] == 0
     assert seen["openai.call"]["model"] == "deepseek-flash"
     assert seen["openai.call"]["extra_body"] == {"thinking": {"type": "disabled"}}
     assert seen["openai.call"]["temperature"] == 1.2 and seen["openai.call"]["max_tokens"] == 400

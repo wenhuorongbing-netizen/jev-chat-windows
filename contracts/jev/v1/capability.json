@@ -1,0 +1,155 @@
+{
+  "contract": "capability",
+  "version": 1,
+  "doc": "Can this route's model take image input? Four states: supported / unsupported / unknown / disabled_by_policy. 'unsupported' needs the PROVIDER to say so (its model list declares input modalities and 'image' is not among them); everything we merely failed to find out is 'unknown'. 'disabled_by_policy' is the owner switching images off and wins over everything. Each result carries its evidence: provider_declared (supported / unsupported), field_absent, model_not_listed, unknown_shape, fetch_failed, owner_disabled (all unknown / disabled). A model-name guess is never evidence. Adapters: a base whose origin is https://openrouter.ai reads the modality list at 'architecture.input_modalities', then at 'input_modalities'; every other base reads only 'input_modalities'. A field an adapter does not read does not exist for it. The model id is matched exactly (after trimming). Only supported / unsupported results are cached, per cache key; unknown is never cached.",
+  "evidence": ["provider_declared", "field_absent", "model_not_listed", "unknown_shape", "fetch_failed", "owner_disabled"],
+  "parse_cases": [
+    {
+      "name": "provider lists image",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"data\":[{\"id\":\"m1\",\"input_modalities\":[\"text\",\"image\"]}]}",
+      "expect": {"state": "supported", "evidence": "provider_declared"}
+    },
+    {
+      "name": "provider lists text only",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"data\":[{\"id\":\"m1\",\"input_modalities\":[\"text\"]}]}",
+      "expect": {"state": "unsupported", "evidence": "provider_declared"}
+    },
+    {
+      "name": "the entry has no modality field",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"data\":[{\"id\":\"m1\",\"object\":\"model\"}]}",
+      "expect": {"state": "unknown", "evidence": "field_absent"}
+    },
+    {
+      "name": "the model is not in the list",
+      "base": "https://api.example.com/v1", "model": "m2",
+      "body": "{\"data\":[{\"id\":\"m1\",\"input_modalities\":[\"text\",\"image\"]}]}",
+      "expect": {"state": "unknown", "evidence": "model_not_listed"}
+    },
+    {
+      "name": "model id is matched exactly, case included",
+      "base": "https://api.example.com/v1", "model": "M1",
+      "body": "{\"data\":[{\"id\":\"m1\",\"input_modalities\":[\"text\",\"image\"]}]}",
+      "expect": {"state": "unknown", "evidence": "model_not_listed"}
+    },
+    {
+      "name": "model id is trimmed before matching",
+      "base": "https://api.example.com/v1", "model": "  m1 ",
+      "body": "{\"data\":[{\"id\":\"m1\",\"input_modalities\":[\"image\"]}]}",
+      "expect": {"state": "supported", "evidence": "provider_declared"}
+    },
+    {
+      "name": "body is not JSON",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "<html>gateway</html>",
+      "expect": {"state": "unknown", "evidence": "unknown_shape"}
+    },
+    {
+      "name": "empty body",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "",
+      "expect": {"state": "unknown", "evidence": "unknown_shape"}
+    },
+    {
+      "name": "JSON without a data array",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"models\":[{\"id\":\"m1\"}]}",
+      "expect": {"state": "unknown", "evidence": "unknown_shape"}
+    },
+    {
+      "name": "data is not an array",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"data\":{\"id\":\"m1\"}}",
+      "expect": {"state": "unknown", "evidence": "unknown_shape"}
+    },
+    {
+      "name": "modalities is not an array",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"data\":[{\"id\":\"m1\",\"input_modalities\":\"image\"}]}",
+      "expect": {"state": "unknown", "evidence": "unknown_shape"}
+    },
+    {
+      "name": "an explicit null modality list is the same as an absent one",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"data\":[{\"id\":\"m1\",\"input_modalities\":null}]}",
+      "expect": {"state": "unknown", "evidence": "field_absent"}
+    },
+    {
+      "name": "an empty modality list says nothing",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"data\":[{\"id\":\"m1\",\"input_modalities\":[]}]}",
+      "expect": {"state": "unknown", "evidence": "unknown_shape"}
+    },
+    {
+      "name": "unknown extra fields and other entries are ignored",
+      "base": "https://api.example.com/v1", "model": "m1",
+      "body": "{\"object\":\"list\",\"data\":[5,{\"id\":\"x\"},{\"id\":\"m1\",\"future\":{\"a\":1},\"input_modalities\":[\"text\",7,\"image\"]}],\"more\":true}",
+      "expect": {"state": "supported", "evidence": "provider_declared"}
+    },
+    {
+      "name": "openrouter adapter reads architecture.input_modalities",
+      "base": "https://openrouter.ai/api/v1", "model": "vendor/m1",
+      "body": "{\"data\":[{\"id\":\"vendor/m1\",\"architecture\":{\"input_modalities\":[\"text\",\"image\"]}}]}",
+      "expect": {"state": "supported", "evidence": "provider_declared"}
+    },
+    {
+      "name": "openrouter adapter: architecture says text only",
+      "base": "https://openrouter.ai/api/v1", "model": "vendor/m1",
+      "body": "{\"data\":[{\"id\":\"vendor/m1\",\"architecture\":{\"input_modalities\":[\"text\"]}}]}",
+      "expect": {"state": "unsupported", "evidence": "provider_declared"}
+    },
+    {
+      "name": "openrouter adapter also reads the top-level list",
+      "base": "https://openrouter.ai/api/v1", "model": "vendor/m1",
+      "body": "{\"data\":[{\"id\":\"vendor/m1\",\"input_modalities\":[\"image\"]}]}",
+      "expect": {"state": "supported", "evidence": "provider_declared"}
+    },
+    {
+      "name": "a generic adapter does not read architecture",
+      "base": "https://api.example.com/v1", "model": "vendor/m1",
+      "body": "{\"data\":[{\"id\":\"vendor/m1\",\"architecture\":{\"input_modalities\":[\"text\",\"image\"]}}]}",
+      "expect": {"state": "unknown", "evidence": "field_absent"}
+    }
+  ],
+  "fetch_cases": [
+    {"name": "401 from the models endpoint", "outcome": "http_401", "expect": {"state": "unknown", "evidence": "fetch_failed", "cached": false}},
+    {"name": "404 from the models endpoint", "outcome": "http_404", "expect": {"state": "unknown", "evidence": "fetch_failed", "cached": false}},
+    {"name": "500 from the models endpoint", "outcome": "http_500", "expect": {"state": "unknown", "evidence": "fetch_failed", "cached": false}},
+    {"name": "timeout", "outcome": "timeout", "expect": {"state": "unknown", "evidence": "fetch_failed", "cached": false}},
+    {"name": "connection failure", "outcome": "transport", "expect": {"state": "unknown", "evidence": "fetch_failed", "cached": false}},
+    {"name": "a blank key is never sent, nothing is known", "outcome": "no_key", "expect": {"state": "unknown", "evidence": "fetch_failed", "cached": false}}
+  ],
+  "cache_key_cases": [
+    {"name": "trailing slash does not matter", "a": {"base": "https://api.example.com/v1", "model": "m"}, "b": {"base": "https://api.example.com/v1/", "model": "m"}, "same": true},
+    {"name": "host and scheme case do not matter", "a": {"base": "https://API.Example.com/v1", "model": "m"}, "b": {"base": "https://api.example.com/v1", "model": "m"}, "same": true},
+    {"name": "default port does not matter", "a": {"base": "https://api.example.com:443/v1", "model": "m"}, "b": {"base": "https://api.example.com/v1", "model": "m"}, "same": true},
+    {"name": "model is trimmed", "a": {"base": "https://api.example.com/v1", "model": " m "}, "b": {"base": "https://api.example.com/v1", "model": "m"}, "same": true},
+    {"name": "another model", "a": {"base": "https://api.example.com/v1", "model": "m"}, "b": {"base": "https://api.example.com/v1", "model": "n"}, "same": false},
+    {"name": "model case matters", "a": {"base": "https://api.example.com/v1", "model": "m"}, "b": {"base": "https://api.example.com/v1", "model": "M"}, "same": false},
+    {"name": "another path on the same host", "a": {"base": "https://api.example.com/v1", "model": "m"}, "b": {"base": "https://api.example.com/v2", "model": "m"}, "same": false},
+    {"name": "another host", "a": {"base": "https://api.example.com/v1", "model": "m"}, "b": {"base": "https://api.other.com/v1", "model": "m"}, "same": false},
+    {"name": "another port", "a": {"base": "http://localhost:8000/v1", "model": "m"}, "b": {"base": "http://localhost:9000/v1", "model": "m"}, "same": false},
+    {"name": "http is not https", "a": {"base": "http://api.example.com/v1", "model": "m"}, "b": {"base": "https://api.example.com/v1", "model": "m"}, "same": false},
+    {"name": "no usable base has no key at all", "a": {"base": "not a url", "model": "m"}, "b": {"base": "not a url", "model": "m"}, "same": false},
+    {"name": "no model has no key at all", "a": {"base": "https://api.example.com/v1", "model": "  "}, "b": {"base": "https://api.example.com/v1", "model": ""}, "same": false}
+  ],
+  "image_decision_doc": "What a request does with an image once the capability is known. owner_enabled=false makes the effective state disabled_by_policy (no image, no matter what). client_can_attach=false is the app's own limit (e.g. a protocol whose client has no image path) and is not a statement about the model. unsupported -> no image. unknown -> the image goes along and the call may fall back to text, but only when the provider rejects the request as such (error class 'unsupported'); any other failure is a real failure. supported -> the image goes along and a failure is a real failure.",
+  "image_decision_cases": [
+    {"name": "owner switched images off", "capability": "supported", "owner_enabled": false, "client_can_attach": true,
+     "expect": {"effective": "disabled_by_policy", "attach": false, "fall_back_to_text": false, "reason": "owner_disabled"}},
+    {"name": "owner off beats unknown too", "capability": "unknown", "owner_enabled": false, "client_can_attach": true,
+     "expect": {"effective": "disabled_by_policy", "attach": false, "fall_back_to_text": false, "reason": "owner_disabled"}},
+    {"name": "supported", "capability": "supported", "owner_enabled": true, "client_can_attach": true,
+     "expect": {"effective": "supported", "attach": true, "fall_back_to_text": false, "reason": "provider_declared"}},
+    {"name": "provider says no", "capability": "unsupported", "owner_enabled": true, "client_can_attach": true,
+     "expect": {"effective": "unsupported", "attach": false, "fall_back_to_text": false, "reason": "provider_declared"}},
+    {"name": "unknown is tried, with a text fallback", "capability": "unknown", "owner_enabled": true, "client_can_attach": true,
+     "expect": {"effective": "unknown", "attach": true, "fall_back_to_text": true, "reason": "not_known"}},
+    {"name": "the client has no image path", "capability": "supported", "owner_enabled": true, "client_can_attach": false,
+     "expect": {"effective": "supported", "attach": false, "fall_back_to_text": false, "reason": "client_limit"}},
+    {"name": "no image path and unknown", "capability": "unknown", "owner_enabled": true, "client_can_attach": false,
+     "expect": {"effective": "unknown", "attach": false, "fall_back_to_text": false, "reason": "client_limit"}}
+  ]
+}

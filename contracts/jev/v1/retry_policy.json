@@ -1,0 +1,59 @@
+{
+  "contract": "retry_policy",
+  "version": 1,
+  "doc": "Every failed model call is one of seven classes; the class alone decides whether it is tried again. auth (the provider refused the key or the account, or the key is bound to another destination and was never sent), rate_limited, timeout, unsupported (the provider rejects the request, the model or the address as such), invalid_response (the provider answered but the answer is unusable, including a refusal), cancelled, transport. Only rate_limited, timeout and transport are retried, each with its own cap on the TOTAL number of attempts. Before every retry the caller is asked whether this generation is still wanted: once before the pause and once after it; a generation that is no longer wanted never retries (a stale or cancelled generation must not keep calling the provider). A failure never carries the provider's response body; the fixed hint text lives in http_hint.json.",
+  "classes": ["auth", "rate_limited", "timeout", "unsupported", "invalid_response", "cancelled", "transport"],
+  "retry": {
+    "auth": {"retry": false, "max_attempts": 1},
+    "rate_limited": {"retry": true, "max_attempts": 3},
+    "timeout": {"retry": true, "max_attempts": 2},
+    "unsupported": {"retry": false, "max_attempts": 1},
+    "invalid_response": {"retry": false, "max_attempts": 1},
+    "cancelled": {"retry": false, "max_attempts": 1},
+    "transport": {"retry": true, "max_attempts": 3}
+  },
+  "status_cases": [
+    {"status": 400, "class": "unsupported"},
+    {"status": 401, "class": "auth"},
+    {"status": 402, "class": "auth"},
+    {"status": 403, "class": "auth"},
+    {"status": 404, "class": "unsupported"},
+    {"status": 408, "class": "timeout"},
+    {"status": 418, "class": "unsupported"},
+    {"status": 422, "class": "unsupported"},
+    {"status": 429, "class": "rate_limited"},
+    {"status": 500, "class": "transport"},
+    {"status": 502, "class": "transport"},
+    {"status": 503, "class": "transport"},
+    {"status": 504, "class": "transport"},
+    {"status": 529, "class": "rate_limited"},
+    {"status": 301, "class": "invalid_response"}
+  ],
+  "failure_cases": [
+    {"failure": "timeout", "class": "timeout"},
+    {"failure": "transport", "class": "transport"},
+    {"failure": "invalid", "class": "invalid_response"},
+    {"failure": "cancelled", "class": "cancelled"},
+    {"failure": "route_mismatch", "class": "auth"}
+  ],
+  "flow_doc": "Attempt codes: ok | http_<status> | timeout | transport | invalid | cancelled | route_mismatch. 'live' is the answers to the is-this-generation-still-wanted question, consumed one per check in order (a retry makes two checks: before the pause, after it); once used up the answer is true. outcome is 'ok' or the class of the last failure; pauses counts the waits between attempts.",
+  "flow_cases": [
+    {"name": "first try works", "attempts": ["ok"], "live": [], "expect": {"calls": 1, "outcome": "ok", "pauses": 0}},
+    {"name": "429 then ok", "attempts": ["http_429", "ok"], "live": [], "expect": {"calls": 2, "outcome": "ok", "pauses": 1}},
+    {"name": "429 three times stops at the cap", "attempts": ["http_429", "http_429", "http_429", "ok"], "live": [], "expect": {"calls": 3, "outcome": "rate_limited", "pauses": 2}},
+    {"name": "a timeout is tried once more, no more", "attempts": ["timeout", "timeout", "ok"], "live": [], "expect": {"calls": 2, "outcome": "timeout", "pauses": 1}},
+    {"name": "transport failures get three tries", "attempts": ["transport", "transport", "ok"], "live": [], "expect": {"calls": 3, "outcome": "ok", "pauses": 2}},
+    {"name": "503 counts as transport", "attempts": ["http_503", "ok"], "live": [], "expect": {"calls": 2, "outcome": "ok", "pauses": 1}},
+    {"name": "401 never retries", "attempts": ["http_401", "ok"], "live": [], "expect": {"calls": 1, "outcome": "auth", "pauses": 0}},
+    {"name": "403 never retries", "attempts": ["http_403", "ok"], "live": [], "expect": {"calls": 1, "outcome": "auth", "pauses": 0}},
+    {"name": "404 never retries", "attempts": ["http_404", "ok"], "live": [], "expect": {"calls": 1, "outcome": "unsupported", "pauses": 0}},
+    {"name": "400 never retries", "attempts": ["http_400", "ok"], "live": [], "expect": {"calls": 1, "outcome": "unsupported", "pauses": 0}},
+    {"name": "an unusable answer never retries", "attempts": ["invalid", "ok"], "live": [], "expect": {"calls": 1, "outcome": "invalid_response", "pauses": 0}},
+    {"name": "cancelled never retries", "attempts": ["cancelled", "ok"], "live": [], "expect": {"calls": 1, "outcome": "cancelled", "pauses": 0}},
+    {"name": "a key bound elsewhere never retries", "attempts": ["route_mismatch", "ok"], "live": [], "expect": {"calls": 1, "outcome": "auth", "pauses": 0}},
+    {"name": "stale before the pause: no retry", "attempts": ["http_503", "ok"], "live": [false], "expect": {"calls": 1, "outcome": "transport", "pauses": 0}},
+    {"name": "stale during the pause: no retry", "attempts": ["http_429", "ok"], "live": [true, false], "expect": {"calls": 1, "outcome": "rate_limited", "pauses": 1}},
+    {"name": "stale at the second failure: stop there", "attempts": ["transport", "transport", "transport"], "live": [true, true, false], "expect": {"calls": 2, "outcome": "transport", "pauses": 1}},
+    {"name": "retry, then a failure that must not be retried", "attempts": ["http_429", "http_401", "ok"], "live": [], "expect": {"calls": 2, "outcome": "auth", "pauses": 1}}
+  ]
+}

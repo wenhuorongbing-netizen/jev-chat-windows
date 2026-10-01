@@ -4,7 +4,7 @@
 上下文、结果、聊天记录都按会话名（子进程 OCR 头部标题得来）分开存，切会话不串味。
 
     pip install rapidocr-onnxruntime numpy windows-capture PySide6-Fluent-Widgets
-两个模型（判断 Jev / 起草语言模型）的来源和 key 在独立设置页填写，不用改代码。IDE 里直接 Run。
+起草语言模型的来源和 key 在独立设置页填写，不用改代码。IDE 里直接 Run。
 """
 import ctypes
 import multiprocessing
@@ -16,13 +16,14 @@ from app import settings, uia_worker, update, worker
 from app.capture import find_wechat_hwnd
 from app.fill import fill_uia
 from app.overlay import Overlay
-from app.qol import auto_generate_allowed, run_with_retry
+from app.qol import auto_generate_allowed
 from app.version import VERSION
+from core import retry
 from core.convo import Coordinator
-from core.engine import analyze, analyze_bilingual, reroll_candidate
+from core.engine import analyze_bilingual, reroll_candidate
 from core.fill_guard import FILL_SUPPORT, CopyOnly, check_fill_target
 from core.image_policy import newest_image
-from core.providers import JEV_ENV, LLM_ENV
+from core.route import ReplyPlan, snapshot_route
 
 # 会话状态（历史、结果、版本、在等的生成、当前开着的会话）全在 core/convo.py 的 Coordinator 里，
 # 只有它的方法能改；这里的 drain / tick / 界面回调只上报事件。history 里是 [(who, text, name)]，
@@ -178,43 +179,30 @@ def latest_image(title, msgs):
     return newest_image(chat.image, msgs, settings.read_images())
 
 
-def analyze_bg(req):
-    """后台线程只跑网络调用，输入只来自不可变的 Request；结果丢队列，UI 和会话状态只在主线程的 tick 里动。
-    失败自动重试一次：第一次异常后等 1.5s（后台线程的 time.sleep，不冻 UI）再试；
-    重试前这一代不再是 live（来了新消息 / 用户取消）就不试直接丢——跟 tick 的过期检查同一口径。"""
-    msgs, title = list(req.msgs), req.title
+def snapshot_plan(title, msgs):
+    """一次生成要用的路由和口径设置，在主线程、发请求之前一次读完定下来（core/route）：
+    来源 / 协议 / 地址 / 模型 / 跟接口核对过的 key，加关系、上下文条数、风格、思考开关。
+    后台线程只拿这份快照；用户在生成中途改设置，改的是下一次，这一次不受影响。"""
     group = len({m[2] for m in msgs if m[0] == "her" and len(m) > 2 and m[2]}) >= 2  # 两个以上发言人 = 群聊
-    rel = settings.relationship_for(title, group)
+    route = snapshot_route(settings.draft_provider(), settings.draft_base_url() or None, settings.draft_model() or None)
+    return ReplyPlan(route, settings.relationship_for(title, group), settings.context(),
+                     settings.style(), settings.thinking())
 
-    def _run():
-        if settings.bilingual():
-            return analyze_bilingual(msgs, rel,
-                                     context=settings.context(),
-                                     model=settings.draft_model() or None,
-                                     provider=settings.draft_provider(),
-                                     base_url=settings.draft_base_url() or None,
-                                     reply_to=req.reply_to, style=settings.style(),
-                                     thinking=settings.thinking(),
-                                     image=req.image)
-        return analyze(msgs, rel, context=settings.context(),
-                       model=settings.draft_model() or None,
-                       provider=settings.draft_provider(),
-                       base_url=settings.draft_base_url() or None,
-                       reply_to=req.reply_to, style=settings.style(),
-                       thinking=settings.thinking(),
-                       jev_provider=settings.jev_provider(),
-                       jev_model=settings.jev_model() or None)
 
-    try:  # key 是为别的接口填的就一个字节都不发，也不重试（换来源/Base URL 之后必须重填）
-        if not settings.bilingual():
-            settings.require_key_route(JEV_ENV)
-        settings.require_key_route(LLM_ENV)
-    except settings.KeyRouteError as e:
-        results.put(("err", f"分析失败: {e}", req))
+def analyze_bg(req):
+    """后台线程只跑网络调用，输入只来自不可变的 Request（含它带的路由快照）；结果丢队列，UI 和会话状态只在主线程的 tick 里动。
+    失败按归类有界重试（core/retry）：只有限流 / 超时 / 连接失败会再试；重试前（睡之前、睡醒后各一次）
+    这一代不再是 live（来了新消息 / 用户取消）就不试直接丢——跟 tick 的过期检查同一口径。"""
+    plan = req.plan
+    if plan is None:  # 不该发生：每个 Request 都是带着快照发出的
+        results.put(("err", "分析失败: 内部错误：这次生成没有路由快照，没有发送。", req))
         return
-    ok, value, _attempts = run_with_retry(_run, lambda: coord.is_live(req), 1.5)
-    if not ok:
-        results.put(("err", f"分析失败: {value}", req))
+    try:  # key 是为别的接口填的就一个字节都不发，也不重试（换来源/Base URL 之后必须重填）
+        plan.route.require()
+        value = retry.run(lambda _n: analyze_bilingual(list(req.msgs), plan, reply_to=req.reply_to, image=req.image),
+                          lambda: coord.is_live(req))
+    except Exception as e:
+        results.put(("err", f"分析失败: {e}", req))
         return
     results.put(("ok", value, req))
 
@@ -233,7 +221,8 @@ def reroll_reply(index):
     后台线程跑 engine.reroll_candidate，结果进 results 队列（kind="reroll"）。"""
     title = ov.current_chat()
     chat = coord.peek(title)
-    ticket = coord.reroll_begin(title, index, latest_image(title, list(chat.history)) if chat else None)
+    ticket = coord.reroll_begin(title, index, latest_image(title, list(chat.history)) if chat else None,
+                                snapshot_plan(title, list(chat.history)) if chat else None)
     if ticket is None:
         return
     ov.set_card_pending(index, True)
@@ -241,21 +230,13 @@ def reroll_reply(index):
 
 
 def _reroll_bg(ticket, result):
-    """后台线程跑网络；UI 只在 tick 里动。关系/图片口径跟正常生成一样（relationship_for / 票里带的图）。"""
-    msgs = list(ticket.msgs)
-    group = len({m[2] for m in msgs if m[0] == "her" and len(m) > 2 and m[2]}) >= 2
+    """后台线程跑网络；UI 只在 tick 里动。路由和口径设置用票里带的快照，图片也是票里带的。"""
     try:
-        settings.require_key_route(LLM_ENV)
-        text, gloss = reroll_candidate(msgs, settings.relationship_for(ticket.title, group),
+        ticket.plan.route.require()
+        text, gloss = reroll_candidate(list(ticket.msgs), ticket.plan,
                                        result.get("lang") or "中文",
                                        list(result.get("candidates") or []),
-                                       context=settings.context(),
-                                       model=settings.draft_model() or None,
-                                       provider=settings.draft_provider(),
-                                       base_url=settings.draft_base_url() or None,
-                                       reply_to=result.get("reply_to"), style=settings.style(),
-                                       thinking=settings.thinking(),
-                                       image=ticket.image)
+                                       reply_to=result.get("reply_to"), image=ticket.image)
         results.put(("reroll", (ticket.index, text, gloss, ""), ticket))
     except Exception as e:
         results.put(("reroll", (ticket.index, "", "", str(e)[:120]), ticket))
@@ -269,14 +250,12 @@ def check_update_bg():
 
 
 def start_analyze(title, msgs):
-    if not settings.bilingual() and not settings.has_jev_key():
-        ov.set_status("请先在设置中配置模型", "warning")
-        return
     if not settings.has_llm_key():
         ov.set_status(f"起草来源 {settings.draft_provider_name()} 没填密钥，去设置里补上", "warning")
         return
     reply_to = target_of(title) if settings.reply_target() else None  # 开关关着就是今天的行为
-    req = coord.begin(title, msgs, reply_to, latest_image(title, msgs))  # 这个会话已有一次在跑 → 排队，回来后接着跑最新的
+    req = coord.begin(title, msgs, reply_to, latest_image(title, msgs),  # 这个会话已有一次在跑 → 排队，回来后接着跑最新的
+                      plan=snapshot_plan(title, msgs))
     ov.set_busy(coord.is_generating(ov.current_chat()))
     if req is not None:
         threading.Thread(target=analyze_bg, args=(req,), daemon=True).start()
@@ -437,7 +416,7 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
         child = spawn_worker()
     if settings.debug_view():  # 上次开着就直接开回来
         set_debug(True)
-    if not settings.has_key():
+    if not settings.has_llm_key():
         ov.set_status("请先在设置中配置模型", "warning")
         ov.after(0, ov.open_settings)
     if settings.secret_issues():  # 比「请先配置」更具体：比如密文解不开

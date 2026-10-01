@@ -8,7 +8,7 @@
 
 <p align="center"><img src="docs/wechat-mp.png" width="640" alt="公众号：恸码奇点"></p>
 
-聊天窗口旁挂的回复辅助：本地 OCR 读屏上的对话 → Jev 判断意图/情绪 → 给出 3 条候选回复 →
+聊天窗口旁挂的回复辅助：本地 OCR 读屏上的对话 → 语言模型起草 → 给出 3 条候选回复 →
 一键填入输入框。**发送永远手动，程序不替你按发送。**
 
 判断内核来自安卓版 [Finderchangchang/jev-chat-JARVIS](https://github.com/Finderchangchang/jev-chat-JARVIS)，
@@ -24,10 +24,10 @@
 2. 解压到一个固定目录（整个文件夹一起，exe 要用旁边那堆文件）
 3. 双击 `jev-chat-windows.exe`
 
-要求：Windows 10 1903+ / 11，聊天窗口开着，两个 API key（判断一个、起草一个，见下）。
+要求：Windows 10 1903+ / 11，聊天窗口开着，一个语言模型的 API key（见下）。
 
-首次启动会弹设置页填这两个 key。key 用 Windows DPAPI 加密后存进 exe 旁边的 `config.json`（只有你这个 Windows 账户能解开），
-全程只有 `JEV_API_KEY` 和 `LLM_API_KEY` 这两个槽，明文不落任何文件；其余设置也写在 exe 旁边的
+首次启动会弹设置页填这个 key。key 用 Windows DPAPI 加密后存进 exe 旁边的 `config.json`（只有你这个 Windows 账户能解开），
+发送只用 `LLM_API_KEY` 这一个槽，明文不落任何文件；其余设置也写在 exe 旁边的
 `config.json`，整个文件夹拷走设置也跟着走。
 
 > exe 没签名，SmartScreen 会拦一下：「更多信息」→「仍要运行」。介意就往下看「自己打包」，自己打的更踏实。
@@ -36,38 +36,34 @@
 
 **第一次启动**
 
-设置页的「模型」卡片分两节，各填一把 key：
+设置页的「模型」卡片只有一节，填一把 key：
 
-1. **判断 · Jev** —— 判断意图、紧张度，并给三条候选排序。来源选 **OpenRouter**（默认，key 在
-   [openrouter.ai](https://openrouter.ai/) 申请）或 **TypeSafe 直连**（key 在
-   [console.typesafe.ai](https://console.typesafe.ai/) 申请）。填的是哪家的 key 看你上面选了哪家。
-2. **起草 · 语言模型** —— 写那三条候选。默认 **DeepSeek 官网**直连，key 在
+1. **起草 · 语言模型** —— 写那三条候选。默认 **DeepSeek 官网**直连，key 在
    [platform.deepseek.com](https://platform.deepseek.com/) 申请（很便宜，起草一次几厘钱）。
    换别家见下面的表，OpenAI / Anthropic / Gemini 三种接口都支持。
-3. 选「你们的关系」（恋人 / 朋友 / 同事 / 家人 / 自定义），保存。可以用了。
+2. 选「你们的关系」（恋人 / 朋友 / 同事 / 家人 / 自定义），保存。可以用了。
 
-两把 key 各管一节，互不相干；同一节里换来源要重填一次 key（只存这一把）。
+换来源要重填一次 key（只存这一把，而且只发往它被填进去时的那个接口）。
 
 **为什么起草默认 DeepSeek 官网直连**
 
-起草是两次网络调用里重的那次。OpenRouter 在国外，从国内过去要等好几秒、还时不时抽风；
+起草是整条链里唯一的一次网络调用。OpenRouter 在国外，从国内过去要等好几秒、还时不时抽风；
 DeepSeek 官方 API（`api.deepseek.com`）国内直连，起草基本就是一次 HTTP 请求的时间，体感差好几倍。
 所以起草默认就是它，不用改。
 
-判断那一步比起草轻得多，慢一点无所谓，默认走 OpenRouter 即可；嫌慢就把它也换成 TypeSafe 直连。
-两把 key 都只进注册表，不落文件。
+key 只存 DPAPI 密文，不落明文文件。
 
 **日常怎么用**
 
 - 聊天窗口开着、别最小化（用别的窗口盖住没事），把要聊的会话点开
-- 对方来一条消息 → 悬浮窗几秒后给判断摘要 + 三条候选（带 Jev 给的胜出概率）
+- 对方来一条消息 → 悬浮窗几秒后给一句分析 + 三条候选回复
 - 点「填入」→ 文字进输入框 → **你自己看一眼、改一改、按发送**。程序永远不碰发送
 - 你切到哪个会话，悬浮窗就跟到哪个；群聊会带上发言人名，想指定回复给谁去设置里开「群聊指定回复对象」
 - 暂时不想让它读聊天：标题栏开关拨到「已暂停」
 
 **花多少钱**
 
-只有对方来新消息才调一次模型：一次起草（DeepSeek Flash）+ 一次 Jev 判断，十分钟没人说话就是十分钟零调用。
+只有对方来新消息才调一次模型：一次起草（DeepSeek Flash），十分钟没人说话就是十分钟零调用。
 思考模式默认关，别开——起草三句话用不上，慢好几倍还贵。
 
 ## 截图
@@ -79,7 +75,7 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，起草基本就是一�
 <td width="33%"><img src="docs/ui_toggle_off.png" alt="采集暂停"></td>
 </tr>
 <tr>
-<td align="center">回复建议：「当前会话」跟随当前窗口、群聊多一行「回复对象」，3 条候选带 Jev 概率百分比，推荐那条置顶</td>
+<td align="center">回复建议：「当前会话」跟随当前窗口、群聊多一行「回复对象」，3 条候选，推荐那条置顶</td>
 <td align="center">设置：关系背景、说话风格、参考上下文条数、群聊指定回复对象（往下还有「模型」卡片）</td>
 <td align="center">采集暂停：不再读取聊天，已有候选照样能填入、能复制</td>
 </tr>
@@ -91,18 +87,17 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，起草基本就是一�
   在下拉框里选另一个会话，翻它的记录和上次的建议（那会儿只能看不能填）。
 - **群聊**：每条消息前面的发言人名会一起喂给模型，所以它知道哪句是谁说的；打开「群聊指定回复对象」
   还能选回复给谁，三条候选都按 TA 写，填入时可带「@名字 」前缀（纯文本）。
-- **3 条候选**：每条带 Jev 给的胜出概率百分比，按概率排序，推荐那条置顶并标「推荐回复」；
-  每条都有「填入」和复制按钮。
-- **判断摘要**：建议动作、可能意图、对方可能需要、紧张度 0–9。
+- **3 条候选**：模型按推荐度排好，第一条置顶并标「推荐回复」；每条都有「填入」和复制按钮。
+- **分析**：一两句话，对方在说什么、什么意图、最该回应的点。
 - **采集开关**：标题栏一拨就停，WGC 会话一起停掉（Win10 的黄框跟着消失），已有候选不受影响。
 - **实时聊天记录**：底部展开，看 OCR 到底读出了什么，认错了一眼就能发现。
 - **调试视图**（可选）：另开一个窗口，实时画出截到的画面和每个识别框——绿 = 我、蓝 = 对方、
   灰 = 过滤掉的灰字、橙 = 当成发言人名、红 = 当成图片丢掉、黄 = 小字丢掉，外加消息区和头部的框、
   OCR 耗时、这一帧读出来的每一行。识别不对时一眼看出是哪一步的锅。只在内存里画，不存图。
-- **两个模型都能换**：判断走 OpenRouter 或 TypeSafe 直连；起草有 12 家预设（默认 DeepSeek 官网），
-  OpenAI / Anthropic / Gemini 三种协议都支持，也能填自己的 Base URL。全程只要两把 key。
+- **模型能换**：起草有 12 家预设（默认 DeepSeek 官网），
+  OpenAI / Anthropic / Gemini 三种协议都支持，也能填自己的 Base URL。全程只要一把 key。
 - **思考模式开关**：默认关；开了模型先想再写，更斟酌但慢好几倍、贵一些。
-- **参考上下文条数**：3~30，默认 10，起草和判断都按它取最近 N 条。
+- **参考上下文条数**：3~30，默认 10，起草按它取最近 N 条。
 - **说话风格**：一句话描述自己的口吻，补在「照着你最近发的消息模仿」之上。
 - **响应式悬浮窗**：置顶、可拖可缩，最小 320×360，窄于 400 进紧凑模式。
 - **新版本提示**：启动时（可关）查一次 GitHub 最新版本号，有新版本会在标题栏下面出现一条提示，
@@ -124,8 +119,8 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，起草基本就是一�
 - **不碰钱。** 转账、红包、收款相关的界面元素一律不碰，起草的 system prompt 里也禁了这几个话题。
 - **只有对方的新消息到来（或你在群里换了回复对象）才调一次模型。** 静默期零调用——十分钟没人说话
   就是十分钟零 token。
-- **API key 只以 DPAPI 密文落盘，而且全程只有两个。** `JEV_API_KEY`（判断）和 `LLM_API_KEY`（起草），
-  不管来源选哪家都是这两个槽。密文和它绑定的接口在同一次原子写里存进 `config.json`，任何文件里都没有明文，
+- **API key 只以 DPAPI 密文落盘，发送只用一把。** `LLM_API_KEY`（起草），
+  不管来源选哪家都是这个槽（旧版的 `JEV_API_KEY` 槽只为老配置迁移保留，没有任何发送路径）。密文和它绑定的接口在同一次原子写里存进 `config.json`，任何文件里都没有明文，
   也绝不进日志（报错文本一律脱敏）。老版本放在用户环境变量里的明文 key 只当迁移来源：启动时加密导入、
   读回核对通过后才删掉 `JEV_API_KEY` / `LLM_API_KEY` 这两个旧变量；任何一步失败都保留旧值并在界面提示（保留不等于使用：没迁成功的明文不会拿去发请求，要在设置里重新填一次），
   不会退到明文存储。`OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` 是别的工具也常用的通用名：只导入，不替你删。
@@ -133,7 +128,7 @@ DeepSeek 官方 API（`api.deepseek.com`）国内直连，起草基本就是一�
   不夹带任何聊天内容；设置里「启动时检查更新」关掉就完全不发这个请求，源码直接跑（没有版本号）也
   不会发。
 
-什么会出网：判断（`JEV_API_KEY`）去你选的 OpenRouter 或 TypeSafe 直连；起草（`LLM_API_KEY`）发给你
+什么会出网：起草（`LLM_API_KEY`）发给你
 在设置里选的那家接口（DeepSeek 官网、OpenRouter、OpenAI、Moonshot、智谱、通义、硅基流动、
 OpenCode Go、Anthropic、Gemini，或者自填的 OpenAI 兼容 / Anthropic 兼容地址），加上启动时（可关）一次到
 GitHub 查版本号。**本项目没有任何自建服务器**，聊天内容只在触发分析的那一刻，发给你自己在设置里
@@ -155,21 +150,15 @@ WGC 截聊天窗口（GPU 合成窗口也能截，被遮挡也能截）
   → 按气泡颜色分 me / her，灰字（引用块、时间戳、群里的发言人名、链接卡片）过滤掉，
     发言人名摘出来挂到它下面那条消息上
   → 跟上一帧比，滚动翻出来的旧消息不重复上报
-  → 冒出新的 her 消息才调 core.engine.analyze()：三段式
-      ① Jev 判断（7 道题）→ ② 把判断当小抄喂给起草，写 3 条候选 → ③ Jev 只排序
-  → 悬浮窗给判断摘要 + 3 条候选 → 点「填入」
+  → 冒出新的 her 消息才调 core.engine.analyze_bilingual()：主线程先把这一次的路由
+    （来源 / 协议 / 地址 / 模型 / 跟接口核对过的 key）和口径设置定成一份不可变快照，
+    后台线程只拿快照，一次起草（对方说外语时顺带出中文翻译和对照），失败按归类有界重试
+  → 悬浮窗给对方原文的中文翻译 + 3 条候选 → 点「填入」
 ```
 
 截图和 OCR 跑在独立子进程里（一帧 OCR 250~800ms，放 Qt 主线程界面会僵），父进程只管界面和网络调用。
 
 ### 模型
-
-**判断 + 排序（key：`JEV_API_KEY`）**
-
-| 来源 | 地址 | 默认模型 |
-| --- | --- | --- |
-| OpenRouter（默认） | `openrouter.ai/api/alpha/decisions` | `typesafe/jev-1.13` |
-| TypeSafe 直连 | `api.typesafe.ai`（官方 `typesafe-sdk`） | `jev-latest` |
 
 **起草 3 条候选（key：`LLM_API_KEY`）**
 
@@ -192,15 +181,10 @@ WGC 截聊天窗口（GPU 合成窗口也能截，被遮挡也能截）
 OpenCode Go 的列表只留走 `/chat/completions` 的模型（DeepSeek、GLM、Kimi、MiMo 等）；
 MiniMax、Qwen 走 `/messages`，Grok、GPT 走 `/responses`，选了会失败，所以不放进下拉框。
 三种协议各走自家官方 SDK（`openai` / `anthropic` / `google-genai`），不自己拼 HTTP；
-判断那条 OpenRouter 的路是唯一的例外——`typesafe-sdk` 把路径写死成 `/v1/systemone`，
-打不到 OpenRouter 的 `/api/alpha/decisions`。
+唯一例外是问 OpenAI 兼容接口的 `GET <base>/models`，用来读服务商自己声明的「这个模型吃不吃图片」（不按模型名猜；
+不跟随重定向，key 不会跟着跳到别处）。
 
-两节各一把 key，都必填。链路是**三段式**（issue #4）：先让 Jev 答 7 道判断题，把
-「对方意图 / 对方需要 / 建议动作 / 紧张度」折成一小段中文小抄喂给起草，三条候选都顺着这个判断写；
-最后再问 Jev 一次「哪条候选最合适」，概率就是卡片上的百分比。**一次分析两次 Jev 调用**——
-以前是盲起草 + 判断和排序一次问完，起草读错意图时三条会一起跑偏，Jev 只能矮子里拔将军。
-判断那次要是挂了（限流、超时），自动退回老路：盲起草 + 一次合问，行为跟以前一样；
-排序那次挂了就按第一条推荐，判断照样显示。
+一次分析一次起草调用（S4 起 Jev 判断 / 排序已退役）；模型给不足 3 条就显示不足 3 条，不追问、不凑数。
 温度 1.2，`max_tokens` 400；思考模式默认关，开了会带上各家自己的思考开关、`max_tokens` 提到 4000
 （思考过程也算进去，400 会把答案截断）。思考开关只有 DeepSeek / OpenRouter / Anthropic / Gemini 认。模型只给出 1~2 条时会带着它的回答追问一次补齐，还不够就按实际
 条数走（少于 2 条就不排序）。
@@ -228,8 +212,7 @@ MiniMax、Qwen 走 `/messages`，Grok、GPT 走 `/responses`，选了会失败�
 - **Windows 10 1903+ 或 Windows 11**（Windows Graphics Capture 的最低要求）
 - **Python 3.10–3.12**（Releases 里的 exe 是 CI 用 3.11 打的；只想用 exe 的话不用装 Python。3.13+ 不行：rapidocr-onnxruntime 1.4.x 官方包 requires_python 封顶 <3.13，pip 会静默改装 1.2.3，启动即 KeyError）
 - **聊天窗口**
-- **两把 API key**：判断用 `JEV_API_KEY`，默认来源 [OpenRouter](https://openrouter.ai/)（或
-  [TypeSafe 直连](https://console.typesafe.ai/)）；起草用 `LLM_API_KEY`，默认
+- **一把 API key**：起草用 `LLM_API_KEY`，默认
   [DeepSeek 官网](https://platform.deepseek.com/)。详见下面「使用说明」
 
 > Win10 上 WGC 会在目标窗口外画一圈黄框，系统不给关；Win11 才能关掉。
@@ -250,7 +233,7 @@ python main.py
 
 PyCharm / VS Code 里直接 Run `main.py` 也行。
 
-首次启动会自动弹出设置页：填两把 key（判断 `JEV_API_KEY`、起草 `LLM_API_KEY`，见上面「使用说明」），
+首次启动会自动弹出设置页：填 key（起草 `LLM_API_KEY`，见上面「使用说明」），
 选你们的关系（恋人 / 朋友 / 同事 / 家人 / 自定义）。key 加密后存进 `config.json`，重启后依然有效，
 不存明文；其余设置也写进项目根的 `config.json`（已在 `.gitignore` 里）。保存失败会明说，不会显示「已保存」。
 
@@ -273,15 +256,12 @@ pyinstaller --noconfirm --clean jev.spec
 
 | 控件 | 作用 | 存在哪 |
 | --- | --- | --- |
-| 你们的关系 | 恋人/朋友/同事/家人/自定义，起草和判断都按它把握称呼和分寸 | `config.json` → `relationship`（默认 `romantic partners`） |
+| 你们的关系 | 恋人/朋友/同事/家人/自定义，起草按它把握称呼和分寸 | `config.json` → `relationship`（默认 `romantic partners`） |
 | 说话风格（可选） | 一句话描述自己的口吻，只喂给起草；留空就只靠最近消息模仿 | `config.json` → `style` |
-| 参考上下文 | 起草和判断各看最近多少条消息，3~30 | `config.json` → `context`（默认 10） |
+| 参考上下文 | 起草看最近多少条消息，3~30 | `config.json` → `context`（默认 10） |
 | 群聊指定回复对象 | 开了群聊里才有「回复对象」那一行，候选针对 TA 写 | `config.json` → `reply_target`（默认关） |
 | 启动时检查更新 | 开了才在启动时查一次 GitHub 最新版本号，有新版本就在标题栏下面提示 | `config.json` → `check_update`（默认开） |
 | 调试视图 | 另开一个窗口实时显示截到的画面和识别框，看识别在哪一步认错。拨一下立刻生效，不用点保存；关掉那个窗口等于关掉开关 | `config.json` → `debug_view`（默认关） |
-| 判断 · 来源 | OpenRouter 还是 TypeSafe 直连 | `config.json` → `jev_provider`（默认 `openrouter`） |
-| 判断 · 密钥 | 上面选哪家就填哪家的 key。已配置时留空 = 保留 | `config.json` 里的 DPAPI 密文（槽 `JEV_API_KEY`） |
-| 判断 · 模型 | 可手打，也可点「获取模型」拉列表挑 | `config.json` → `jev_model`（空 = 该来源默认） |
 | 起草 · 来源 | 上面那张表里的任意一家 | `config.json` → `draft_provider`（默认 `deepseek`） |
 | 起草 · Base URL | 只有两个「自定义」来源才出现这一行 | `config.json` → `draft_base_url` |
 | 起草 · 密钥 | 上面选哪家就填哪家的 key。已配置时留空 = 保留 | `config.json` 里的 DPAPI 密文（槽 `LLM_API_KEY`） |
@@ -311,7 +291,6 @@ pyinstaller --noconfirm --clean jev.spec
 - **聊天窗口别最小化。** Windows 不渲染最小化窗口，什么截图法都拿不到画面。程序发现被最小化会无激活还原
   再压到最底下（不抢焦点），但直接用别的窗口盖住它是更省心的做法——被遮挡不影响 WGC。
 - **群聊和单聊各算一个会话**（群名后面的成员数「(422)」会去掉，只拿名字当 key）。
-- **判断题的口径是按一对一写的**，群里多人混说时结论会偏。
 
 ## 项目结构
 
@@ -322,15 +301,17 @@ app/                    UI + 采集层
   ocr.py                RapidOCR 读消息区 → 按颜色分 me/her/灰字 → 滚动去重；另读头部的会话名
   worker.py             采集子进程主循环（截图 → 定位 → OCR → 去重 → 丢队列）
   fill.py               填入不发送：写剪贴板 → 点输入框 → Ctrl+V，到此为止
-  overlay.py            置顶悬浮窗：会话/回复对象、判断摘要、3 条候选、聊天记录、设置页（PySide6 + Fluent）
+  overlay.py            置顶悬浮窗：会话/回复对象、分析、3 条候选、聊天记录、设置页（PySide6 + Fluent）
   debugwin.py           调试视图：另一个窗口画当前帧 + 每个识别框的分类；只在内存里画，不存图
-  settings.py           两把 key 只进注册表，其余设置落 config.json
-core/                   Jev 判断内核，平台无关，跟安卓原版同一套口径
-  engine.py             唯一入口 analyze(messages, relationship) → 候选 + 排序 + 判断
-  providers.py          两张来源表（判断 / 起草）：协议、地址、默认模型；纯数据，不认 key
+  settings.py           key 只存 DPAPI 密文，其余设置落 config.json
+core/                   回复内核，平台无关，跟安卓版共用 contracts/jev/v1 的向量
+  engine.py             唯一入口 analyze_bilingual(messages, plan) / reroll_candidate → 候选 + 翻译 + 分析
+  providers.py          起草来源表：协议、地址、默认模型；纯数据，不认 key
   llm.py                三种协议的薄适配层，一律走官方 SDK：openai / anthropic / google-genai
-  jev_client.py         Jev 判断客户端：OpenRouter（urllib）/ TypeSafe 直连（typesafe-sdk）；脱敏、退避
-  questions.py          7 道判断题 + build_state() + build_rank_question() + 判断小抄 guidance_text() / 中文标签 CHOICE_LABELS
+  jev_client.py         共用的错误 / key 帮手：JevError（带归类）、脱敏、固定提示、credential_for（名字是历史遗留）
+  route.py              一次生成的不可变路由快照 ReplyRoute / ReplyPlan：来源+协议+地址+模型+核对过的 credential
+  capability.py         模型能不能看图：只信服务商模型列表里的声明，四种状态 + 证据，缓存按地址+模型分开
+  retry.py              失败七种归类 + 按归类有界重试（过期的一代不重试）
   draft.py              起草 3 条候选：拼提示词、解析、过滤、不足时追问补齐；调用走 llm.py
 tools/
   demo.py               端到端冒烟：拿一段写死的对话跑完整链（需 key + 联网）
@@ -370,6 +351,15 @@ config.json             你自己的设置，不进仓库（在 .gitignore 里�
 - **没有托盘**：关窗口就是退出（标题栏的「最小化」是收到任务栏，不是后台常驻）。
 
 ## 更新记录
+
+**S4（未发布）**
+- 模型路由快照：来源 / 协议 / 地址 / 模型 / key 在发请求前一次定好，生成中途改设置只影响下一次
+- 能力判断改为只信服务商的模型列表声明（支持 / 不支持 / 不知道 / 已关闭，各带证据），不再按模型名猜
+- 失败分七类（鉴权 / 限流 / 超时 / 不支持 / 回答不可用 / 取消 / 连接），只有限流、超时、连接失败会有界重试，
+  已过期或已取消的生成不重试；报错文字不带服务端响应体
+- 退役 Jev 判断 / 排序运行路径：设置页不再有「判断 · Jev」和「智能回复」开关，去掉 `typesafe-sdk` 依赖；
+  老配置里的 `jev_*` / `bilingual` 字段原样留着，不会让升级崩溃
+- 回复解析 / 失败文案 / 重试表 / 能力表跟安卓版共用同一批向量（`contracts/jev/v1`）
 
 **v0.1.10**
 - 先判断再起草（issue #4）：`analyze()` 改成三段式 —— Jev 先答 7 道判断题，判断折成中文小抄喂进

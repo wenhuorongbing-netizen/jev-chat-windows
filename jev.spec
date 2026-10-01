@@ -11,7 +11,7 @@ hiddenimports = [
     # 父进程这边 engine 也是运行时才走到，一并钉死，别指望静态分析都能扫出来
     "app.worker", "app.capture", "app.ocr", "app.fill", "app.overlay", "app.settings",
     "app.version", "app.update", "app.debugwin",  # debugwin 是开了调试视图才 import 的
-    "core.engine", "core.draft", "core.jev_client", "core.questions", "core.providers",
+    "core.engine", "core.draft", "core.jev_client", "core.providers", "core.route", "core.capability", "core.retry",
     "core.llm", "core.keygate", "core.fill_guard", "core.image_policy",
     "app.uia", "app.uia_worker", "app.images",  # UIA 子进程和抓图；uiautomation / comtypes 是函数内 import
 ]
@@ -24,7 +24,6 @@ for pkg in (
     "windows_capture",       # Rust 编译的 .pyd
     # 四个模型 SDK：core/llm.py 和 jev_client 里是**函数内 import**，静态分析扫不到，必须显式收
     "openai",
-    "typesafe_sdk",
     "anthropic",
     "google.genai",
     "uiautomation",          # QQ / WhatsApp 的 UI 自动化（app/uia.py 函数内 import，静态分析扫不到）

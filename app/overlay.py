@@ -6,7 +6,6 @@ import sys
 import threading
 import time
 from datetime import datetime
-from math import isfinite
 from types import SimpleNamespace
 
 import ctypes
@@ -36,7 +35,6 @@ from app.theme import (ACCENT, ACCENT_HOVER, ACCENT_PRESS, ACCENT_SOFT, AUX, BOD
 from app.version import VERSION
 from core import jev_client, keygate, llm, providers
 from core.fill_guard import CopyOnly
-from core.questions import CHOICE_LABELS
 
 _LOG_LINES = 300
 # 全局热键 id → VK：1..3 = Alt+数字填卡（老规矩），4 = Alt+J 显隐面板，5 = Alt+G 立即生成
@@ -54,8 +52,6 @@ _CHAT_RELATIONSHIPS = [
 ]
 
 
-def _choice(answers, name):
-    return CHOICE_LABELS[name].get((answers.get(name) or {}).get("choice"), "暂未判断")
 
 
 def _mp_banner_path() -> str:
@@ -744,8 +740,8 @@ class Overlay:
         if not self.docked:
             self._restore_geometry()  # 贴靠的话 dock.py 会摆，别抢
         self._relayout(self.win.width(), self.win.height())  # resizeEvent 补不到构造时这一次
-        self.set_status("等待新消息" if settings.has_key() else "需要配置模型",
-                        "idle" if settings.has_key() else "warning")
+        self.set_status("等待新消息" if settings.has_llm_key() else "需要配置模型",
+                        "idle" if settings.has_llm_key() else "warning")
         self._paint_pin()
         self.win.show()
         from app.dock import Docker
@@ -866,7 +862,7 @@ class Overlay:
         # 一句人话 + 一个动作：缺 key → 去设置；其它出错 → 重试。按场景二选一
         self.setupButton = PrimaryPushButton("去设置")
         self.setupButton.clicked.connect(self.open_settings)
-        self.setupButton.setVisible(not settings.has_key())
+        self.setupButton.setVisible(not settings.has_llm_key())
         empty_box.addWidget(self.setupButton, 0, Qt.AlignHCenter)
         self.retryButton = PushButton("重试")
         self.retryButton.clicked.connect(
@@ -1113,18 +1109,9 @@ class Overlay:
         box.addWidget(self._hint(
             "开了以后群聊里可以选回复给谁，候选会针对 TA 写，填入时可带 @。关了就正常回复。"
         ))
-        bilingual_row = QHBoxLayout()
-        bilingual_row.addWidget(_label("智能回复（跟随对方语言）", AUX), 1)
-        self.bilingualSwitch = SwitchButton()
-        self.bilingualSwitch.setOnText("开")
-        self.bilingualSwitch.setOffText("关")
-        self.bilingualSwitch.setAccessibleName("智能回复（跟随对方语言）")
-        self.bilingualSwitch.checkedChanged.connect(lambda on: self.jevBox.setVisible(not on))
-        bilingual_row.addWidget(self.bilingualSwitch)
-        box.addLayout(bilingual_row)
         box.addWidget(self._hint(
-            "对方说中文就用中文回；说德语、英语等外语就翻成中文给你看，3 条回复用对方的语言写并附中文意思，"
-            "填入只填外语。只要「起草」那把 key，不用 Jev / OpenRouter。关掉则用 Jev 判断 + 排序（要两把 key）。"
+            "回复跟随对方的语言：对方说中文就用中文回；说德语、英语等外语就翻成中文给你看，"
+            "3 条回复用对方的语言写并附中文意思，填入只填外语。"
         ))
         gloss_row = QHBoxLayout()
         gloss_row.addWidget(_label("回复卡上显示中文意思", AUX), 1)
@@ -1182,15 +1169,6 @@ class Overlay:
         box.addWidget(_label("模型", BODY, INK, True))
         self._fetched = _Fetched()
         self._fetched.done.connect(self._models_fetched)
-        self.jevBox = QWidget()  # 智能回复模式用不到 Jev，整组藏起来
-        jev_box = QVBoxLayout(self.jevBox)
-        jev_box.setContentsMargins(0, 0, 0, 0)
-        jev_box.setSpacing(12)
-        self.jev = self._model_group(jev_box, "判断 · Jev", "jev", providers.JEV_PROVIDERS)
-        jev_box.addWidget(self._hint(
-            "判断意图、紧张度，并给三条候选排序。只有关掉「智能回复」时才需要。"
-        ))
-        box.addWidget(self.jevBox)
         self.draft = self._model_group(box, "起草 · 语言模型", "draft", providers.DRAFT_PROVIDERS)
         box.addWidget(self._hint(
             "写那三条候选。OpenAI / Anthropic / Gemini 三种接口都走各自官方 SDK。"
@@ -1235,13 +1213,12 @@ class Overlay:
         return label
 
     def _model_group(self, box, title, kind, table):
-        """一组「来源 / 密钥 / 模型」控件，判断和起草各一份。table 是 core/providers.py 里那张表。"""
+        """一组「来源 / 密钥 / 模型」控件（S4 起只剩起草一份）。table 是 core/providers.py 里那张表。"""
         group = SimpleNamespace(kind=kind, table=table, ids=list(table),
-                                keyTitle="判断" if kind == "jev" else "起草",
+                                keyTitle="起草",
                                 # 存的 key 只算给「界面上现在选的这个接口」用的：绑定在别的接口上就当没配，
                                 # 「获取模型」也就不会把它发给刚选的新来源
-                                stored_key=lambda k=kind: settings.key_for_route(
-                                    providers.JEV_ENV if k == "jev" else providers.LLM_ENV, self._route_of(k)))
+                                stored_key=lambda k=kind: settings.key_for_route(providers.LLM_ENV, self._route_of(k)))
         heading = QHBoxLayout()
         heading.addWidget(_label(title, BODY, INK, True), 1)
         group.keyState = _label("", AUX, ACCENT)
@@ -1271,9 +1248,7 @@ class Overlay:
         key_label.setBuddy(group.keyEdit)
         group.keyEdit.returnPressed.connect(self._save)
         box.addWidget(group.keyEdit)
-        box.addWidget(self._hint(
-            "OpenRouter 的 key 或 TypeSafe 的 key，看上面选的来源。" if kind == "jev"
-            else "上面选哪家就填哪家的 key；换来源重填一次，只存这一把。"))
+        box.addWidget(self._hint("上面选哪家就填哪家的 key；换来源重填一次，只存这一把。"))
         model_label = _label("模型", AUX)
         box.addWidget(model_label)
         row = QHBoxLayout()
@@ -1299,15 +1274,13 @@ class Overlay:
 
     def _route_of(self, kind):
         """界面上现在选的接口会把 key 发往哪里（跟 settings 里绑定的同一种 origin 口径）。"""
-        if kind == "jev":
-            return providers.jev_route(self._provider_of(self.jev))
         return providers.draft_route(self._provider_of(self.draft), self.baseEdit.text().strip())
 
     def _provider_changed(self, group):
         """换来源：模型框回到这家该有的值（存的就是这家才用存的，否则用它的默认），状态清掉。"""
         provider = self._provider_of(group)
-        saved = settings.jev_provider() if group.kind == "jev" else settings.draft_provider()
-        stored = settings.jev_model() if group.kind == "jev" else settings.draft_model()
+        saved = settings.draft_provider()
+        stored = settings.draft_model()
         group.modelBox.clear()
         group.modelBox.setText(stored if provider == saved else group.table[provider].default)
         group.status.setText("")
@@ -1317,7 +1290,7 @@ class Overlay:
         """两组共用：密钥已配置/未配置、占位文案、自定义 Base URL 行的显隐，
         外加紧凑模式下把来源按钮上的文字省略——ComboBox 是 QPushButton，
         minimumSizeHint 按整段文字算，不会自动换行/省略，长名字会把设置页撑宽。"""
-        for group in (self.jev, self.draft):
+        for group in (self.draft,):
             provider = self._provider_of(group)
             name = group.table[provider].name
             configured = bool(group.stored_key())
@@ -1350,22 +1323,16 @@ class Overlay:
                          daemon=True).start()
 
     def _list_models(self, group, provider, key, base, typed=False):
-        """后台线程：判断走 jev_client，起草按协议走 llm；失败把原因一起送回主线程。
+        """后台线程：按协议走 llm 列模型；失败把原因一起送回主线程。
         key 连同要发往的接口一起装进 Credential：刚敲的 key 就是给页面上选的这个接口的；存的 key 要过绑定核对。"""
         try:
-            if group.kind == "jev":
-                dest = jev_client.jev_destination(provider)
-                cred = (keygate.typed_credential(key, dest) if typed
-                        else keygate.stored_credential(providers.JEV_ENV, key, dest))
-                models = jev_client.list_models(provider, cred)
-            else:
-                spec = providers.DRAFT_PROVIDERS[provider]
-                dest = keygate.destination_of(spec.protocol, base or spec.base)
-                cred = (keygate.typed_credential(key, dest) if typed
-                        else keygate.stored_credential(providers.LLM_ENV, key, dest))
-                models = llm.list_models(spec.protocol, base or spec.base, cred, headers=spec.headers)
-                if spec.keep:  # 目录里混了别的协议时，只留这条路打得通的
-                    models = [m for m in models if spec.keep(m)]
+            spec = providers.DRAFT_PROVIDERS[provider]
+            dest = keygate.destination_of(spec.protocol, base or spec.base)
+            cred = (keygate.typed_credential(key, dest) if typed
+                    else keygate.stored_credential(providers.LLM_ENV, key, dest))
+            models = llm.list_models(spec.protocol, base or spec.base, cred, headers=spec.headers)
+            if spec.keep:  # 目录里混了别的协议时，只留这条路打得通的
+                models = [m for m in models if spec.keep(m)]
             reason = "" if models else "这个来源没返回任何模型"
         except Exception as exc:  # 线程里漏异常会静默吞掉，按钮就永远停在禁用态
             # 只有我们自己写的固定文案能显示；别的异常只报类型，不带任何异常原文
@@ -1408,11 +1375,8 @@ class Overlay:
         self.styleEdit.setText(settings.style())
         self.contextBox.setValue(settings.context())
         self.targetSwitch.setChecked(settings.reply_target())
-        self.bilingualSwitch.setChecked(settings.bilingual())
         self.glossSwitch.setChecked(settings.show_gloss())
         self.imagesSwitch.setChecked(settings.read_images())
-        self.jevBox.setVisible(not settings.bilingual())
-        self._set_group(self.jev, settings.jev_provider(), settings.jev_model())
         self._set_group(self.draft, settings.draft_provider(), settings.draft_model())
         self.baseEdit.setText(settings.draft_base_url())
         self.thinkingSwitch.setChecked(settings.thinking())
@@ -1424,7 +1388,6 @@ class Overlay:
     def _save(self):
         relationship = _RELATIONSHIPS[self.relationshipBox.currentIndex()][1]
         relationship = relationship or self.relEdit.text().strip()
-        jev_provider = self._provider_of(self.jev)
         draft_provider = self._provider_of(self.draft)
         base = self.baseEdit.text().strip()
         if not relationship:
@@ -1435,23 +1398,17 @@ class Overlay:
             self._settings_feedback("自定义来源要填 Base URL。", error=True)
             self.baseEdit.setFocus()
             return
-        bilingual = self.bilingualSwitch.isChecked()
-        groups = ((self.draft, draft_provider),) if bilingual else ((self.jev, jev_provider), (self.draft, draft_provider))
-        for group, provider in groups:  # 双语模式不调 Jev，判断那组可以空着
-            name = group.table[provider].name
-            if not group.keyEdit.text().strip() and not group.stored_key():
-                self._settings_feedback(f"请先填写 {group.keyTitle} 的 API 密钥。", error=True)
-                group.keyEdit.setFocus()
-                return
-            if not group.modelBox.text().strip():
-                self._settings_feedback(f"{name} 请先获取并选择一个模型。", error=True)
-                group.modelBox.setFocus()
-                return
+        group = self.draft
+        if not group.keyEdit.text().strip() and not group.stored_key():
+            self._settings_feedback(f"请先填写 {group.keyTitle} 的 API 密钥。", error=True)
+            group.keyEdit.setFocus()
+            return
+        if not group.modelBox.text().strip():
+            self._settings_feedback(f"{group.table[draft_provider].name} 请先获取并选择一个模型。", error=True)
+            group.modelBox.setFocus()
+            return
         try:
             settings.save(relationship, self.contextBox.value(),
-                          jev_provider_text=jev_provider,
-                          jev_key_text=self.jev.keyEdit.text().strip() or None,
-                          jev_model_text=self.jev.modelBox.text().strip(),
                           draft_provider_text=draft_provider,
                           llm_key_text=self.draft.keyEdit.text().strip() or None,
                           draft_model_text=self.draft.modelBox.text().strip(),
@@ -1460,7 +1417,6 @@ class Overlay:
                           style_text=self.styleEdit.text().strip(),
                           thinking_on=self.thinkingSwitch.isChecked(),
                           check_update_on=self.updateSwitch.isChecked(),
-                          bilingual_on=bilingual,
                           read_images_on=self.imagesSwitch.isChecked(),
                           show_gloss_on=self.glossSwitch.isChecked())
         except settings.SecretError:
@@ -1501,10 +1457,9 @@ class Overlay:
             self._load_settings()
         self.pages.setCurrentWidget(self.settingsPage)
         self.settingsButton.setEnabled(False)
-        (self.relationshipBox if settings.has_key() else self.jev.keyEdit).setFocus()
+        (self.relationshipBox if settings.has_llm_key() else self.draft.keyEdit).setFocus()
 
     def _back_home(self):
-        self.jev.keyEdit.clear()
         self.draft.keyEdit.clear()
         self.pages.setCurrentWidget(self.home)
         self.settingsButton.setEnabled(True)
@@ -1626,7 +1581,7 @@ class Overlay:
 
     def _capture_text(self, on, reason=""):
         """开关状态对应的状态行和空态文案。已有的候选不受影响，暂停了照样能填入/复制。"""
-        configured = settings.has_key()
+        configured = settings.has_llm_key()
         if not on:
             self.set_status(reason or "采集已暂停，聊天内容不再读取", "warning")
         elif configured:
@@ -1720,7 +1675,7 @@ class Overlay:
     def _empty_text(self):
         """空态卡片的默认文案，配好没配好两套说法。"""
         self._empty_tone()  # 回到白底灰字（出错态是红底红字）
-        configured = settings.has_key()
+        configured = settings.has_llm_key()
         self.emptyTitle.setText("等待对方的新消息" if configured else "先设置，再开始")
         self.emptyHint.setText("对方发来新消息会自动生成；也可以点右上角 ⟳ 立即生成。"
                                if configured else "先在设置里填好模型密钥。")
@@ -1755,7 +1710,7 @@ class Overlay:
             self._empty_tone(danger=True)
             self.emptyTitle.setText("暂时没有可用的回复")
             self.emptyHint.setText("请按上方提示处理。收到新的对方消息后会再次尝试。")
-            configured = settings.has_key()
+            configured = settings.has_llm_key()
             self.setupButton.setVisible(not configured)
             self.retryButton.setVisible(configured)
 
@@ -2102,37 +2057,17 @@ class Overlay:
             self.replyBox.addWidget(card)
             self.cards.append(card)
         reply_to = result.get("reply_to")
-        if "translation" in result:  # 智能回复：没有 Jev 判断，这张卡放对方原文 + 中文翻译
-            lang = lang or "外语"
-            self.insightTitle.setText(f"对方说 · {lang}" + (f" · 回复给 {reply_to}" if reply_to else ""))
-            translation = shown_translation(result.get("translation"), lang)
-            self.summary.setText(translation)  # 中文对话没有译文行：原文就是中文，再译一遍只会分不清
-            self.summary.setVisible(bool(translation))
-            analysis = result.get("analysis") or ""
-            self.intent.setText("")  # 分析挪到回复卡列表下面了，灯泡前缀一起退役
-            self.intent.setVisible(False)
-            self.analysis.set_full(analysis)  # 模型怎么理解的：理解错了回复多半也跑偏
-            self.analysis.setVisible(bool(analysis))
-            self.tension.setText("")
-            self._finish_show()
-            return
-        self.analysis.set_full("")  # Jev 模式的判断摘要留在「对话参考」卡里，下面不再放分析行
-        self.analysis.hide()
-        self.insightTitle.setText(f"对话参考 · 回复给 {reply_to}" if reply_to else "对话参考")
-        self.summary.show()
-        self.intent.show()
-        answers = result.get("answers") or {}
-        self.summary.setText("建议：" + _choice(answers, "best_action"))
-        self.intent.setText("可能意图 · " + _choice(answers, "true_intent") +
-                            "\n可能需要 · " + _choice(answers, "she_needs"))
-        score = (answers.get("danger_level") or {}).get("score")
-        valid_score = isinstance(score, (int, float)) and isfinite(score) and 0 <= score <= 9
-        self.tension.setText(f"紧张度 {score:.0f}/9" if valid_score else "紧张度待判断")
-        color = WARN if valid_score and score >= 3 else SUB
-        if valid_score and score >= 6:
-            color = DANGER
-        qss = f"BodyLabel {{ color: {color}; background: transparent; }}"
-        setCustomStyleSheet(self.tension, qss, qss)
+        lang = lang or "外语"  # 这张卡放对方原文的中文翻译
+        self.insightTitle.setText(f"对方说 · {lang}" + (f" · 回复给 {reply_to}" if reply_to else ""))
+        translation = shown_translation(result.get("translation"), lang)
+        self.summary.setText(translation)  # 中文对话没有译文行：原文就是中文，再译一遍只会分不清
+        self.summary.setVisible(bool(translation))
+        analysis = result.get("analysis") or ""
+        self.intent.setText("")  # 分析挪到回复卡列表下面了，灯泡前缀一起退役
+        self.intent.setVisible(False)
+        self.analysis.set_full(analysis)  # 模型怎么理解的：理解错了回复多半也跑偏
+        self.analysis.setVisible(bool(analysis))
+        self.tension.setText("")
         self._finish_show()
 
     def _finish_show(self):

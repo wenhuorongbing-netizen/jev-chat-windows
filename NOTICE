@@ -28,7 +28,6 @@ PySide6-Fluent-Widgets，该组件是 GPLv3 协议，非商用免费，商用需
 | openai | Apache-2.0 | OpenAI 官方 SDK，起草走 OpenAI 协议时使用 |
 | anthropic | MIT | Anthropic 官方 SDK |
 | google-genai | Apache-2.0 | Google Gemini 官方 SDK |
-| typesafe-sdk | MIT | TypeSafe 官方 SDK，Jev 判断走 TypeSafe 直连时使用 |
 
 各组件的完整许可证文本以其官方发行包（PyPI / 官网）为准，本文件不逐一转载。
 

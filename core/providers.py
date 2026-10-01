@@ -1,34 +1,23 @@
 # -*- coding: utf-8 -*-
-"""两张来源表：判断模型 Jev / 起草语言模型。纯数据，不联网、不认 key。
+"""起草语言模型的来源表。纯数据，不联网、不认 key。
 
 表里只有协议、地址和默认模型，**绝不出现 key**（KICKOFF 硬约束 #6）——
 key 一律由调用方从环境变量/注册表取了再传进来。协议具体怎么调见 core/llm.py。
 
-全程只有两把 key：判断一把 JEV_API_KEY、起草一把 LLM_API_KEY，跟选哪家来源无关，
-换来源就是换同一个槽里的值。
+发送只用起草那把 LLM_API_KEY，换来源就是换同一个槽里的值。JEV_API_KEY 槽（旧版判断模型）S4 起不再有任何
+发送路径，只留着让老配置能迁移、脱敏时还认得它。
 """
 from __future__ import annotations
 
 import uuid
 from collections import namedtuple
 
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"  # OpenAI 兼容；auth/key 探测也挂在它下面
-# Jev 判断只有 OpenRouter 这条路要自己拼 HTTP：typesafe_sdk 把路径写死成 /v1/systemone，打不到这个地址
-OPENROUTER_DECISIONS = "https://openrouter.ai/api/alpha/decisions"
-# 免费的密钥探测端点：Jev 模型不在 /models 目录里（列表写死），key 对不对靠它验
-OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/auth/key"
-TYPESAFE_BASE = "https://api.typesafe.ai"
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"  # OpenAI 兼容
 
-JEV_ENV = "JEV_API_KEY"    # 判断那把，不管选 OpenRouter 还是 TypeSafe
+JEV_ENV = "JEV_API_KEY"    # 旧版判断那把：只为迁移和脱敏保留，没有发送路径
 LLM_ENV = "LLM_API_KEY"    # 起草那把，不管选哪家语言模型
 # 迁移：老版本按来源各存一个变量。新变量空着、老变量有值就先用老的（保存时抄进新的）
 LEGACY = {JEV_ENV: "OPENROUTER_API_KEY", LLM_ENV: "DEEPSEEK_API_KEY"}
-
-_Jev = namedtuple("_Jev", "name default")
-JEV_PROVIDERS = {
-    "openrouter": _Jev("OpenRouter", "typesafe/jev-1.13"),
-    "typesafe": _Jev("TypeSafe 直连", "jev-latest"),
-}
 
 # protocol ∈ {openai, anthropic, gemini}：决定 core/llm.py 用哪个官方 SDK
 # base 空 = 用 SDK 自带的默认地址（gemini），或者等用户自己填（自定义来源）
@@ -98,8 +87,8 @@ def draft_route(provider: str, base_url: str = "") -> str:
 
 
 def jev_route(provider: str) -> str:
-    """判断那把 key 的去向；两家判断来源的地址是固定的。"""
-    return _origin({"openrouter": OPENROUTER_BASE, "typesafe": TYPESAFE_BASE}.get(provider, "")) or f"provider:{provider}"
+    """旧版判断那把 key 的绑定去向（只为读老配置里的绑定记录）；两家判断来源的地址是固定的。"""
+    return _origin({"openrouter": OPENROUTER_BASE, "typesafe": "https://api.typesafe.ai"}.get(provider, "")) or f"provider:{provider}"
 
 # 起草时认思考开关的来源，设置页那句提示照着这里写
 THINKING = ("DeepSeek", "OpenRouter", "Anthropic", "Gemini")
