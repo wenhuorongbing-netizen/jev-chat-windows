@@ -50,6 +50,7 @@ class ReplyPlan:
     context: int
     style: str
     thinking: bool
+    image_enabled: bool = True  # 用户开了「识别图片」才会把图发给回复模型（main.snapshot_plan 填）
 
 
 def snapshot_route(provider: str, base_url: str | None, model: str | None) -> ReplyRoute:

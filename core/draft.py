@@ -140,7 +140,8 @@ def draft_candidates(messages: list, relationship: str, route: ReplyRoute,
                      timeout: float = 30, keep: int = 10,
                      reply_to: str | None = None, style: str = "", thinking: bool = False,
                      image: str | None = None,
-                     info: dict | None = None, avoid: list[str] | None = None) -> list[str]:
+                     info: dict | None = None, avoid: list[str] | None = None,
+                     image_enabled: bool = True, still_wanted=lambda: True) -> list[str]:
     """messages: [(from, text)] 或 [(from, text, name)]，from ∈ {her, me}，name = 群里的发言人；
     只看最近 keep 条。返回最多 3 条中文候选（过滤后可能是 0 条，调用方要处理）。
 
@@ -175,13 +176,15 @@ def draft_candidates(messages: list, relationship: str, route: ReplyRoute,
     # 1.2：DeepSeek 自己推荐的闲聊档位，0.8 出来的话太板正
     # max_tokens：三句话本来 400 够，但思考过程也算进 max_tokens，开了思考模式 400 会把答案截断
     # 1.0：1.2 时偶尔冒出接不上话的怪句子；max_tokens 700：多了一句分析
-    content = _with_image_fallback(lambda img: chat(
+    content, use = _with_image_fallback(lambda img: chat(
         route.protocol, route.base_url, key, route.model, SYSTEM, [user],
         temperature=1.0, max_tokens=4000 if thinking else 700, thinking=thinking,
-        extra_body=spec.extra(thinking), headers=spec.headers, timeout=timeout, image=img), image, route)
+        extra_body=spec.extra(thinking), headers=spec.headers, timeout=timeout, image=img),
+        image, route, image_enabled, still_wanted)
     cands, analysis = _parse_chinese(content)
     if info is not None:
         info["analysis"] = analysis
+        info["image_use"] = use
     # 不足 3 条就是不足：不追问第二次、不凑数（reply_outcome.json 规则 3），下游按实际条数处理
     return _sanitize(cands, suspects, _her_recent(messages))[:3]
 
@@ -260,33 +263,47 @@ def _parse_bilingual(content: str) -> dict:
             "candidates": cands[:3], "glosses": glosses[:3]}
 
 
-def image_decision(route: ReplyRoute, image) -> capability.ImageDecision | None:
-    """这次带不带图、不认图时退不退回纯文字（core/capability.decide_image）。能力问服务商自己的模型列表：
-    image 只有用户开了「识别图片」才会有，所以这里 owner_enabled 恒为真；没有图就不用问。"""
+def image_decision(route: ReplyRoute, image, owner_enabled: bool = True) -> capability.ImageDecision | None:
+    """这次带不带图、不认图时退不退回纯文字（core/capability.decide_image）。没有图就不用问；
+    用户关了识别图片就是 DISABLED_BY_POLICY，连服务商的模型列表都不去问；其余能力问服务商自己的模型列表。"""
     if not image:
         return None
+    if not owner_enabled:
+        return capability.decide_image(capability.DISABLED_BY_POLICY, False, True)
     cap = CAPABILITIES.image_input(route)
     return capability.decide_image(cap.state, True, route.protocol == "openai")
 
 
-def _with_image_fallback(send, image, route):
+# 这次请求怎么处置图，界面上要说一声的几种（跟 Android 的 ImageUse 一份口径）
+IMAGE_NOTES = {
+    "text_disabled": "图片识别已在设置里关闭，这次只按文字回复",
+    "text_unsupported": "回复模型不支持看图，这次只按文字回复",
+    "fell_back": "回复模型拒绝了图片，这次只按文字回复",
+}
+
+
+def _with_image_fallback(send, image, route, owner_enabled=True, still_wanted=lambda: True):
     """按能力判断带图：服务商明说不认图就不带；不知道就带着试，只有服务商把这次请求当成「不支持」拒了（unsupported 类）
-    才退回纯文字再发一次；别的失败（密钥被拒、超时、限流……）是真失败，照常往上抛，不用换个姿势再打一遍。"""
-    decision = image_decision(route, image)
-    if decision is None or not decision.attach:
-        return send(None)
+    且这一代还有人要，才退回纯文字再发一次；别的失败（密钥被拒、超时、限流……）是真失败，照常往上抛，不用换个姿势再打一遍。
+    返回 (正文, image_use)：none / attached / text_disabled / text_unsupported / fell_back。"""
+    decision = image_decision(route, image, owner_enabled)
+    if decision is None:
+        return send(None), "none"
+    if not decision.attach:
+        return send(None), "text_disabled" if decision.effective == capability.DISABLED_BY_POLICY else "text_unsupported"
     try:
-        return send(image)
+        return send(image), "attached"
     except JevError as e:
-        if decision.fall_back_to_text and e.kind == "unsupported":
-            return send(None)
-        raise
+        if not (decision.fall_back_to_text and e.kind == "unsupported" and still_wanted()):
+            raise
+    return send(None), "fell_back"
 
 
 def draft_bilingual(messages: list, relationship: str, route: ReplyRoute,
                     timeout: float = 30, keep: int = 10, reply_to: str | None = None,
                     style: str = "", thinking: bool = False, image: str | None = None,
-                    avoid: list[str] | None = None) -> dict:
+                    avoid: list[str] | None = None, image_enabled: bool = True,
+                    still_wanted=lambda: True) -> dict:
     """对方说外语时，一次调用：认出语言 L + 对方最新消息的中文翻译 + 3 条用 L 写的回复（各带中文对照）。
     只要起草那把 key，路由用快照（core/route.snapshot_route）。
     返回 {"lang", "translation", "candidates", "glosses"}，候选按推荐度排好。"""
@@ -304,12 +321,12 @@ def draft_bilingual(messages: list, relationship: str, route: ReplyRoute,
     if avoid:  # 仅此一处提示词改动；avoid=None/空 时与现状逐字一致
         user += "\n\n以下几条已经出现过了，换一个角度，别重复：" + "；".join(avoid)
     key = route.require()
-    content = _with_image_fallback(lambda img: chat(
+    content, use = _with_image_fallback(lambda img: chat(
         route.protocol, route.base_url, key, route.model,
         BILINGUAL_SYSTEM, [user], temperature=0.9, max_tokens=4000 if thinking else 900,
         thinking=thinking, extra_body=spec.extra(thinking), headers=spec.headers,
-        timeout=timeout, image=img), image, route)
-    return _parse_bilingual(content)
+        timeout=timeout, image=img), image, route, image_enabled, still_wanted)
+    return {**_parse_bilingual(content), "image_use": use}
 
 
 if __name__ == "__main__":

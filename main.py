@@ -21,6 +21,7 @@ from app.version import VERSION
 from core import retry
 from core.convo import Coordinator
 from core.engine import analyze_bilingual, reroll_candidate
+from core.draft import IMAGE_NOTES
 from core.fill_guard import FILL_SUPPORT, CopyOnly, check_fill_target
 from core.image_policy import newest_image
 from core.route import ReplyPlan, snapshot_route
@@ -186,7 +187,7 @@ def snapshot_plan(title, msgs):
     group = len({m[2] for m in msgs if m[0] == "her" and len(m) > 2 and m[2]}) >= 2  # 两个以上发言人 = 群聊
     route = snapshot_route(settings.draft_provider(), settings.draft_base_url() or None, settings.draft_model() or None)
     return ReplyPlan(route, settings.relationship_for(title, group), settings.context(),
-                     settings.style(), settings.thinking())
+                     settings.style(), settings.thinking(), image_enabled=settings.read_images())
 
 
 def analyze_bg(req):
@@ -199,7 +200,8 @@ def analyze_bg(req):
         return
     try:  # key 是为别的接口填的就一个字节都不发，也不重试（换来源/Base URL 之后必须重填）
         plan.route.require()
-        value = retry.run(lambda _n: analyze_bilingual(list(req.msgs), plan, reply_to=req.reply_to, image=req.image),
+        value = retry.run(lambda _n: analyze_bilingual(list(req.msgs), plan, reply_to=req.reply_to, image=req.image,
+                                                             still_wanted=lambda: coord.is_live(req)),
                           lambda: coord.is_live(req))
     except Exception as e:
         results.put(("err", f"分析失败: {e}", req))
@@ -236,7 +238,8 @@ def _reroll_bg(ticket, result):
         text, gloss = reroll_candidate(list(ticket.msgs), ticket.plan,
                                        result.get("lang") or "中文",
                                        list(result.get("candidates") or []),
-                                       reply_to=result.get("reply_to"), image=ticket.image)
+                                       reply_to=result.get("reply_to"), image=ticket.image,
+                                       still_wanted=lambda: coord.reroll_valid(ticket))
         results.put(("reroll", (ticket.index, text, gloss, ""), ticket))
     except Exception as e:
         results.put(("reroll", (ticket.index, "", "", str(e)[:120]), ticket))
@@ -341,6 +344,9 @@ def _take_result(kind, r, req):
     if kind == "ok":
         if req.title == ov.current_chat():  # 存着了；正看着这个会话才立刻贴上去
             ov.show(r)
+            note = IMAGE_NOTES.get(r.get("image_use"))
+            if note:  # 图没发出去（设置关了 / 模型不看图 / 被拒）要说一声，别让人以为模型看过图
+                ov.set_status(note, "warning")
     else:
         ov.set_status("生成失败，请检查网络和服务设置；新消息到来后会重试。", "error")
         ov.log(r)

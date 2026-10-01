@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import itertools
 from collections import deque
 from dataclasses import dataclass, field
@@ -59,9 +60,12 @@ class Chat:
         self.rev = 0
         self.target = None  # 用户挑的回复对象；None = 跟着最近那个
         self.senders = []  # 发过言的人，最近的排最前
-        self.image = None  # (第几条, base64)
+        self.image = None  # (第几条, base64)：这次回复会话的图，新消息 / 取消 / 切走会话 / 断开采集都收回（结果不留图，但「换一条」凭它还在会话里才有效），不进联系人、记忆和磁盘
         self.live = None  # 这个会话当前要的那一代 gen；None = 没有在等的生成
         self.running = set()  # 网络线程还没回来的 gen（取消后清空，只为合并排队）
+
+    def release_image(self):
+        self.image = None
 
     def target_name(self):
         if self.target in self.senders:
@@ -97,8 +101,20 @@ class Coordinator:
         chat = self._chats.get(title)
         return bool(chat) and (chat.live is not None or title in self._queued)
 
+    def _drop_picture(self, title):
+        """回复会话的图不再能用：会话里的收回，排队等着跑的那份也别再带它。"""
+        chat = self._chats.get(title)
+        if chat:
+            chat.release_image()
+        q = self._queued.get(title)
+        if q and q[2] is not None:
+            self._queued[title] = (q[0], q[1], None, q[3])
+
     # ---- 当前开着哪个会话（采集上报）
     def set_open_chat(self, app, title):
+        prev = self._open.get(app)
+        if prev is not None and prev != title and prev in self._chats:
+            self._drop_picture(prev)  # 切走了会话：旧会话的图不再能用
         self._open[app] = title
 
     def open_chat(self, app):
@@ -106,6 +122,8 @@ class Coordinator:
 
     def forget_open_chats(self):
         self._open.clear()
+        for title in self._chats:
+            self._drop_picture(title)
 
     def set_foreground(self, app):
         """聊天 App 到了前台：返回界面该跟到的会话（没有 / 没变 = None）。"""
@@ -124,6 +142,7 @@ class Coordinator:
         chat = self.chat(title)
         chat.rev += 1
         chat.live = None
+        self._drop_picture(title)  # 回复会话随新消息结束；这批里带图的再重新记
         for item in new:
             who, name, text = item[:3]
             chat.history.append((who, text, name))
@@ -160,7 +179,8 @@ class Coordinator:
         if accepted:
             chat.live = None
             if result is not None:
-                chat.result, chat.result_req = result, req
+                # 结果只记来历，不留图：图的生命周期是回复会话，不是这份结果
+                chat.result, chat.result_req = result, (dataclasses.replace(req, image=None) if req.image else req)
         queued = self._queued.get(req.title)
         if accepted and queued == (req.msgs, req.reply_to, req.image, req.plan):
             queued = None  # 排队的和刚出结果的是同一份输入（生成期间又点了「立即生成」）：不再白跑一次
@@ -181,6 +201,7 @@ class Coordinator:
         chat = self.chat(title)
         chat.rev += 1
         chat.live = None
+        self._drop_picture(title)
         chat.running.clear()
         self._queued.pop(title, None)
 
@@ -200,10 +221,11 @@ class Coordinator:
         return RerollTicket(title, index, chat.rev, chat.result_req, tuple(chat.history), image, plan)
 
     def reroll_valid(self, ticket: RerollTicket) -> bool:
-        """晚到的重 roll 只在：会话没动过、显示的还是它发出时那份结果、没有新的生成在替换它。"""
+        """晚到的重 roll 只在：会话没动过、显示的还是它发出时那份结果、没有新的生成在替换它、带图的话图所属的回复会话还没结束。"""
         chat = self._chats.get(ticket.title)
         return (chat is not None and chat.rev == ticket.rev and chat.result_req is ticket.basis
-                and chat.live is None)
+                and chat.live is None
+                and (ticket.image is None or (chat.image is not None and chat.image[1] == ticket.image)))  # 带图的票：图所属的会话还在
 
     # ---- 填入前的来历核对
     def fill_expect(self, title):
