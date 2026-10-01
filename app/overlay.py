@@ -834,17 +834,12 @@ class Overlay:
         row = QHBoxLayout()
         self.insightTitle = _label("对方说", TINY, FAINT, True)  # FAINT 小字，靠字重出层级
         row.addWidget(self.insightTitle, 1)
-        self.tension = _label("", AUX)
-        self.tension.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        row.addWidget(self.tension)
         insight_box.addLayout(row)
         self.latest = _ElideLine(lines=2)  # 对方原文：灰，默认 2 行省略，点击展开/收起
         insight_box.addWidget(self.latest)
         self.summary = _label("", BODY, INK, True)  # 译文 / 判断建议
         self.summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         insight_box.addWidget(self.summary)
-        self.intent = _label("", AUX, SUB)
-        insight_box.addWidget(self.intent)
         self.insight.hide()
         body.addWidget(self.insight)
         self.context = self.insight  # 旧代码里「对方最近说」那块现在并进这张卡
@@ -1287,19 +1282,19 @@ class Overlay:
         self._sync_model_fields()
 
     def _sync_model_fields(self):
-        """两组共用：密钥已配置/未配置、占位文案、自定义 Base URL 行的显隐，
+        """密钥已配置/未配置、占位文案、自定义 Base URL 行的显隐，
         外加紧凑模式下把来源按钮上的文字省略——ComboBox 是 QPushButton，
         minimumSizeHint 按整段文字算，不会自动换行/省略，长名字会把设置页撑宽。"""
-        for group in (self.draft,):
-            provider = self._provider_of(group)
-            name = group.table[provider].name
-            configured = bool(group.stored_key())
-            group.keyState.setText("已配置" if configured else "未配置")
-            group.keyEdit.setPlaceholderText(
-                "已配置，留空保留" if configured else f"输入 {name} API 密钥")
-            if self._compact:
-                name = group.providerBox.fontMetrics().elidedText(name, Qt.ElideRight, 180)
-            group.providerBox.setText(name)
+        group = self.draft
+        provider = self._provider_of(group)
+        name = group.table[provider].name
+        configured = bool(group.stored_key())
+        group.keyState.setText("已配置" if configured else "未配置")
+        group.keyEdit.setPlaceholderText(
+            "已配置，留空保留" if configured else f"输入 {name} API 密钥")
+        if self._compact:
+            name = group.providerBox.fontMetrics().elidedText(name, Qt.ElideRight, 180)
+        group.providerBox.setText(name)
         custom = self._provider_of(self.draft) in providers.CUSTOM
         self.baseLabel.setVisible(custom)
         self.baseEdit.setVisible(custom)
@@ -2063,11 +2058,8 @@ class Overlay:
         self.summary.setText(translation)  # 中文对话没有译文行：原文就是中文，再译一遍只会分不清
         self.summary.setVisible(bool(translation))
         analysis = result.get("analysis") or ""
-        self.intent.setText("")  # 分析挪到回复卡列表下面了，灯泡前缀一起退役
-        self.intent.setVisible(False)
         self.analysis.set_full(analysis)  # 模型怎么理解的：理解错了回复多半也跑偏
         self.analysis.setVisible(bool(analysis))
-        self.tension.setText("")
         self._finish_show()
 
     def _finish_show(self):
